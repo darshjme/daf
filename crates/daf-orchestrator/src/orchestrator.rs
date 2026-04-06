@@ -163,6 +163,7 @@ impl Orchestrator {
 
         self.agents.insert(id, entry);
         self.router.register_agent(manifest.clone());
+        self.supervisor.lock().add_agent(id);
         self.metrics.agent_spawned();
 
         debug!(%id, capabilities = manifest.capabilities.len(), "agent registered");
@@ -181,6 +182,7 @@ impl Orchestrator {
                 id: agent_id.to_string(),
             })?;
         self.router.deregister_agent(agent_id);
+        self.supervisor.lock().remove_agent(agent_id);
         self.metrics.agent_removed();
         info!(%agent_id, "agent removed");
         Ok(())
