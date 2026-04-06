@@ -1,0 +1,129 @@
+# =============================================================================
+# DAF Runtime Configuration
+# =============================================================================
+#
+# This file configures a single DAF node. Copy it to your project root and
+# customize as needed. All values shown are the defaults.
+#
+# Environment variable overrides:
+#   DAF_NODE_NAME          -> node.name
+#   DAF_BIND_ADDRESS       -> node.bind_address
+#   DAF_DATA_DIR           -> node.data_dir
+#   DAF_LOG_LEVEL          -> logging.level
+#   DAF_TRANSPORT_PROTOCOL -> transport.protocol
+
+# ---------------------------------------------------------------------------
+# Node identity and network
+# ---------------------------------------------------------------------------
+node:
+  # Human-readable name for this node (appears in logs and cluster membership).
+  name: "daf-local"
+
+  # Address and port for the primary DDAL transport listener.
+  bind_address: "127.0.0.1:9400"
+
+  # Directory for persistent state: task logs, agent checkpoints, provision
+  # state, and embedded storage (RocksDB/sled).
+  data_dir: "./data"
+
+  # Maximum number of agents that may run concurrently on this node.
+  max_agents: 256
+
+  # Maximum number of tasks waiting in the global scheduler queue.
+  max_queued_tasks: 10000
+
+# ---------------------------------------------------------------------------
+# Transport layer
+# ---------------------------------------------------------------------------
+transport:
+  # Protocol: tcp (dev), tls (production), unix (same-host only).
+  protocol: tcp
+
+  # Maximum concurrent connections across all agents.
+  max_connections: 100
+
+  # Maximum message size before rejection (bytes). Default: 16 MiB.
+  max_message_size: 16777216
+
+  # TCP keep-alive interval in seconds. Set to null to disable.
+  keepalive_secs: 30
+
+  # TLS settings (required when protocol is "tls").
+  # tls_cert_path: /etc/daf/tls/cert.pem
+  # tls_key_path: /etc/daf/tls/key.pem
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging:
+  # Minimum severity: trace, debug, info, warn, error.
+  level: info
+
+  # Output format: json (machine-readable) or text (human-readable).
+  format: json
+
+  # Destination: stdout, stderr, or file.
+  output: stdout
+
+  # File path when output is "file".
+  # file_path: /var/log/daf/daf.log
+
+# ---------------------------------------------------------------------------
+# Memory subsystem (tiered agent memory)
+# ---------------------------------------------------------------------------
+memory:
+  # Maximum entries in the hot (in-memory) tier.
+  hot_capacity: 1000
+
+  # Maximum entries in the warm (on-disk) tier.
+  warm_capacity: 10000
+
+  # How often to compact warm storage, merging and deduplicating entries.
+  compaction_interval: "5m"
+
+  # Embedding model for semantic recall (when vector search is enabled).
+  # embedding_model: all-mpnet-base-v2
+
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
+orchestrator:
+  # Maximum concurrent mission graphs executing at once.
+  max_concurrent_missions: 5
+
+  # How often agents send heartbeats to prove liveness.
+  heartbeat_interval: "10s"
+
+  # Maximum time a single wave (parallel batch of tasks) may run before
+  # the orchestrator declares it timed out.
+  wave_timeout: "5m"
+
+  # Grace period for agent shutdown before force-kill.
+  shutdown_timeout: "15s"
+
+# ---------------------------------------------------------------------------
+# Registry
+# ---------------------------------------------------------------------------
+registry:
+  # Where to discover agent manifests.
+  # Options: local (scan agents/ directory), remote (HTTP registry).
+  mode: local
+
+  # Path to scan for agent manifest files (when mode is "local").
+  manifest_dir: "./agents"
+
+  # Remote registry URL (when mode is "remote").
+  # remote_url: https://registry.daf.darshj.ai
+
+# ---------------------------------------------------------------------------
+# Metrics and observability
+# ---------------------------------------------------------------------------
+metrics:
+  # Enable the built-in metrics HTTP endpoint.
+  enabled: true
+
+  # Port for the metrics/debug HTTP server.
+  port: 9401
+
+  # Export format: prometheus or json.
+  format: prometheus

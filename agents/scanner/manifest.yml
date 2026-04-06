@@ -1,0 +1,78 @@
+name: daf-scanner
+kind: specialist
+version: "0.1.0"
+description: "Scans agent configurations and communication channels for security vulnerabilities"
+
+capabilities:
+  - name: config-audit
+    version: "1.0.0"
+    description: "Audit agent configurations against security baselines"
+  - name: channel-inspection
+    version: "1.0.0"
+    description: "Inspect DDAL channels for unencrypted traffic and auth gaps"
+  - name: capability-review
+    version: "1.0.0"
+    description: "Review agent capabilities for excessive privilege"
+  - name: secret-detection
+    version: "1.0.0"
+    description: "Detect exposed secrets in agent metadata and payloads"
+  - name: cve-check
+    version: "1.0.0"
+    description: "Check agent dependencies against known vulnerability databases"
+
+resource_limits:
+  max_memory_mb: 512
+  max_cpu_ms: 900000
+  max_connections: 48
+  max_message_queue: 128
+
+health_check:
+  endpoint: /health
+  interval: 30s
+  timeout: 10s
+  failure_threshold: 2
+
+scan_policies:
+  - name: default
+    severity_threshold: medium
+    auto_remediate: false
+    scan_interval: 1h
+  - name: strict
+    severity_threshold: low
+    auto_remediate: false
+    scan_interval: 15m
+
+metadata:
+  maintainer: "darsh@darshj.ai"
+  repository: "https://github.com/darshjme/daf"
+  license: "Apache-2.0"
+  category: security
+  stability: stable
+  compliance:
+    - CIS-benchmark
+    - OWASP-agents
+
+dependencies:
+  - daf-core >= 0.1.0
+  - daf-vault >= 0.1.0
+  - daf-registry >= 0.1.0
+  - daf-transport >= 0.1.0
+
+channels:
+  subscribes:
+    - security.scan.request
+    - security.scan.schedule
+    - agent.registered
+    - agent.config.changed
+  publishes:
+    - security.scan.result
+    - security.finding.critical
+    - security.finding.high
+    - security.remediation.suggested
+
+tags:
+  - security
+  - scanning
+  - audit
+  - compliance
+  - vulnerability-detection

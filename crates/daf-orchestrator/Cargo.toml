@@ -1,0 +1,32 @@
+[package]
+name = "daf-orchestrator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Agent orchestration engine: sprint planning, wave execution, specialist routing, health monitoring"
+
+[dependencies]
+daf-core = { path = "../daf-core" }
+daf-ddal = { path = "../daf-ddal" }
+daf-graph = { path = "../daf-graph" }
+daf-transport = { path = "../daf-transport" }
+daf-logger = { path = "../daf-logger" }
+daf-memory = { path = "../daf-memory" }
+daf-registry = { path = "../daf-registry" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+async-trait.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+crossbeam.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

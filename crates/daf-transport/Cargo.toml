@@ -1,0 +1,26 @@
+[package]
+name = "daf-transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Transport layer for DAF: TCP, Unix sockets, TLS, and in-process channels"
+
+[dependencies]
+daf-core = { path = "../daf-core" }
+daf-ddal = { path = "../daf-ddal" }
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+tokio-util.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
+dashmap.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

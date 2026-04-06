@@ -1,0 +1,61 @@
+name: daf-provisioner
+kind: specialist
+version: "0.1.0"
+description: "Provisions agent topologies and manages resource lifecycles"
+
+capabilities:
+  - name: provision
+    version: "1.0.0"
+    description: "Create, update, and destroy agent infrastructure"
+  - name: state-management
+    version: "1.0.0"
+    description: "Track and reconcile provisioned resource state"
+  - name: topology-planning
+    version: "1.0.0"
+    description: "Compute execution plans from topology diffs"
+  - name: resource-graph
+    version: "1.0.0"
+    description: "Build and validate dependency graphs between resources"
+
+resource_limits:
+  max_memory_mb: 256
+  max_cpu_ms: 600000
+  max_connections: 32
+  max_message_queue: 512
+
+health_check:
+  endpoint: /health
+  interval: 15s
+  timeout: 5s
+  failure_threshold: 3
+
+metadata:
+  maintainer: "darsh@darshj.ai"
+  repository: "https://github.com/darshjme/daf"
+  license: "Apache-2.0"
+  category: infrastructure
+  stability: stable
+
+dependencies:
+  - daf-core >= 0.1.0
+  - daf-provision >= 0.1.0
+  - daf-graph >= 0.1.0
+  - daf-vault >= 0.1.0
+
+channels:
+  subscribes:
+    - topology.plan.request
+    - topology.apply.request
+    - topology.destroy.request
+    - resource.status.query
+  publishes:
+    - topology.plan.response
+    - topology.apply.response
+    - topology.state.changed
+    - resource.status.report
+
+tags:
+  - infrastructure
+  - lifecycle
+  - provisioning
+  - state-management

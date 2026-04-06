@@ -1,0 +1,214 @@
+# =============================================================================
+# DAF Configuration Playbook
+# =============================================================================
+#
+# Configures all production agents with baseline settings, security hardening,
+# and role-specific tuning. Tasks are idempotent — running this playbook
+# multiple times produces the same result.
+#
+# Usage:
+#   daf configure run     -f playbook.yml                # Apply to all hosts
+#   daf configure check   -f playbook.yml                # Dry-run (no changes)
+#   daf configure run     -f playbook.yml --limit analyzers  # Single group
+
+name: production-baseline
+description: >
+  Baseline configuration for all production agents. Applies security
+  hardening, resource limits, health checks, and observability settings.
+
+# Target hosts — matches against inventory groups, host names, or kinds.
+hosts: production
+
+# Playbook-level variables (override group/global vars).
+vars:
+  deployment_id: "deploy-2026-04-07"
+  config_version: "2.0.0"
+  metrics_port: 9401
+  log_format: json
+
+# ---------------------------------------------------------------------------
+# Roles to apply (in order)
+# ---------------------------------------------------------------------------
+roles:
+  - base
+  - security-hardened
+  - observability
+
+# ---------------------------------------------------------------------------
+# Role definitions
+# ---------------------------------------------------------------------------
+role_definitions:
+  # -- Base role: applied to every agent --
+  - name: base
+    defaults:
+      max_memory_mb: "128"
+      health_interval: "60s"
+      log_level: "info"
+    tasks:
+      - name: Set cluster identity
+        module: metadata
+        params:
+          key: cluster
+          value: "{{ cluster_name }}"
+
+      - name: Set deployment tag
+        module: metadata
+        params:
+          key: deployment_id
+          value: "{{ deployment_id }}"
+
+      - name: Configure memory limit
+        module: resource_limit
+        params:
+          resource: memory
+          limit: "{{ max_memory_mb }}MB"
+        notify:
+          - restart agent
+
+      - name: Configure CPU limit
+        module: resource_limit
+        params:
+          resource: cpu
+          limit: "{{ max_cpu_ms }}ms"
+        notify:
+          - restart agent
+
+      - name: Configure health check
+        module: health_check
+        params:
+          endpoint: /health
+          interval: "{{ health_interval }}"
+          timeout: 5s
+          failure_threshold: 3
+
+      - name: Set log level
+        module: logging
+        params:
+          level: "{{ log_level }}"
+          format: "{{ log_format }}"
+
+    handlers:
+      - name: restart agent
+        module: restart
+        params:
+          graceful: true
+          timeout: 15s
+
+  # -- Security hardening role --
+  - name: security-hardened
+    defaults:
+      tls_required: "true"
+      secret_rotation_interval: "24h"
+    tasks:
+      - name: Enforce TLS on all channels
+        module: capability
+        params:
+          name: tls_enforcement
+          version: "1.0.0"
+          state: present
+        when: "{{ tls_required }}"
+        notify:
+          - restart agent
+
+      - name: Enable secret rotation
+        module: capability
+        params:
+          name: secret_rotation
+          version: "1.0.0"
+          state: present
+
+      - name: Configure secret rotation interval
+        module: metadata
+        params:
+          key: secret_rotation_interval
+          value: "{{ secret_rotation_interval }}"
+
+      - name: Restrict metadata visibility
+        module: capability
+        params:
+          name: metadata_redaction
+          version: "1.0.0"
+          state: present
+
+      - name: Enable audit logging
+        module: capability
+        params:
+          name: audit_log
+          version: "1.0.0"
+          state: present
+
+    handlers:
+      - name: restart agent
+        module: restart
+        params:
+          graceful: true
+          timeout: 15s
+
+  # -- Observability role --
+  - name: observability
+    defaults:
+      metrics_enabled: "true"
+      trace_sampling_rate: "0.1"
+    tasks:
+      - name: Enable metrics endpoint
+        module: capability
+        params:
+          name: metrics_export
+          version: "1.0.0"
+          state: present
+        when: "{{ metrics_enabled }}"
+
+      - name: Configure metrics port
+        module: metadata
+        params:
+          key: metrics_port
+          value: "{{ metrics_port }}"
+        when: "{{ metrics_enabled }}"
+
+      - name: Enable distributed tracing
+        module: capability
+        params:
+          name: distributed_tracing
+          version: "1.0.0"
+          state: present
+
+      - name: Set trace sampling rate
+        module: metadata
+        params:
+          key: trace_sampling_rate
+          value: "{{ trace_sampling_rate }}"
+
+      - name: Configure log aggregation
+        module: capability
+        params:
+          name: log_aggregation
+          version: "1.0.0"
+          state: present
+
+    handlers: []
+
+# ---------------------------------------------------------------------------
+# Inline tasks (run after all roles)
+# ---------------------------------------------------------------------------
+tasks:
+  - name: Tag config version
+    module: metadata
+    params:
+      key: config_version
+      value: "{{ config_version }}"
+
+  - name: Validate final configuration
+    module: validate
+    params:
+      strict: true
+      report_format: json
+
+# ---------------------------------------------------------------------------
+# Playbook-level handlers
+# ---------------------------------------------------------------------------
+handlers:
+  - name: restart agent
+    module: restart
+    params:
+      graceful: true
+      timeout: 15s

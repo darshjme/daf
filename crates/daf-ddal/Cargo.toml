@@ -1,0 +1,30 @@
+[package]
+name = "daf-ddal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "DDAL — Darshj's Distributed Agent Language: binary socket-based agent communication protocol"
+
+[dependencies]
+daf-core = { path = "../daf-core" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+bincode.workspace = true
+rmp-serde.workspace = true
+tokio-util.workspace = true
+dashmap.workspace = true
+crossbeam.workspace = true
+blake3.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

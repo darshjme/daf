@@ -1,0 +1,30 @@
+[package]
+name = "daf-sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "SDK for building DAF agents: macros, derive traits, testing harness, agent templates"
+
+[dependencies]
+daf-core = { path = "../daf-core" }
+daf-ddal = { path = "../daf-ddal" }
+daf-transport = { path = "../daf-transport" }
+daf-logger = { path = "../daf-logger" }
+daf-memory = { path = "../daf-memory" }
+daf-registry = { path = "../daf-registry" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+parking_lot.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

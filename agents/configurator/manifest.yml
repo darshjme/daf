@@ -1,0 +1,64 @@
+name: daf-configurator
+kind: specialist
+version: "0.1.0"
+description: "Configures agents via playbooks with idempotent task execution"
+
+capabilities:
+  - name: playbook-execution
+    version: "1.0.0"
+    description: "Execute ordered task playbooks against agent inventories"
+  - name: role-management
+    version: "1.0.0"
+    description: "Compose and apply reusable configuration roles"
+  - name: handler-chains
+    version: "1.0.0"
+    description: "Trigger handler cascades on configuration changes"
+  - name: variable-interpolation
+    version: "1.0.0"
+    description: "Resolve variables with host > group > global precedence"
+  - name: idempotent-apply
+    version: "1.0.0"
+    description: "Detect current state and skip tasks that are already satisfied"
+
+resource_limits:
+  max_memory_mb: 256
+  max_cpu_ms: 300000
+  max_connections: 64
+  max_message_queue: 256
+
+health_check:
+  endpoint: /health
+  interval: 20s
+  timeout: 5s
+  failure_threshold: 3
+
+metadata:
+  maintainer: "darsh@darshj.ai"
+  repository: "https://github.com/darshjme/daf"
+  license: "Apache-2.0"
+  category: configuration
+  stability: stable
+
+dependencies:
+  - daf-core >= 0.1.0
+  - daf-configure >= 0.1.0
+  - daf-transport >= 0.1.0
+  - daf-vault >= 0.1.0
+
+channels:
+  subscribes:
+    - config.playbook.request
+    - config.role.register
+    - config.inventory.update
+    - config.check.request
+  publishes:
+    - config.playbook.result
+    - config.task.changed
+    - config.task.failed
+    - config.handler.triggered
+
+tags:
+  - configuration
+  - playbooks
+  - idempotent
+  - roles

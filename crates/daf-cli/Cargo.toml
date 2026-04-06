@@ -1,0 +1,47 @@
+[package]
+name = "daf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "DAF CLI — Darshj's Agent Framework command-line interface"
+
+[[bin]]
+name = "daf"
+path = "src/main.rs"
+
+[dependencies]
+daf-core = { path = "../daf-core" }
+daf-ddal = { path = "../daf-ddal" }
+daf-transport = { path = "../daf-transport" }
+daf-orchestrator = { path = "../daf-orchestrator" }
+daf-provision = { path = "../daf-provision" }
+daf-configure = { path = "../daf-configure" }
+daf-logger = { path = "../daf-logger" }
+daf-memory = { path = "../daf-memory" }
+daf-registry = { path = "../daf-registry" }
+daf-sdk = { path = "../daf-sdk" }
+daf-runtime = { path = "../daf-runtime" }
+daf-graph = { path = "../daf-graph" }
+daf-vault = { path = "../daf-vault" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+dialoguer.workspace = true
+indicatif.workspace = true
+console.workspace = true
+comfy-table.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+serde_yaml_ng.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+tempfile.workspace = true

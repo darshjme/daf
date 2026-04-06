@@ -1,0 +1,166 @@
+# =============================================================================
+# DAF Topology Definition
+# =============================================================================
+#
+# Defines the desired agent infrastructure — pools of agents, communication
+# channels between them, and global resource constraints. DAF computes a
+# diff between this file and the current provisioned state, then applies
+# the minimal set of changes to converge.
+#
+# Usage:
+#   daf provision plan   -f topology.yml    # Show what would change
+#   daf provision apply  -f topology.yml    # Apply the changes
+#   daf provision show                       # Show current state
+
+name: research-pipeline
+version: "2.0.0"
+description: "Three-stage research pipeline with autoscaling and security scanning"
+
+# ---------------------------------------------------------------------------
+# Agent pools — groups of identical agents that scale horizontally
+# ---------------------------------------------------------------------------
+pools:
+  - name: researchers
+    kind: specialist
+    description: "Gathers raw data from configured sources"
+    replicas: 3
+    min_replicas: 1
+    max_replicas: 10
+    capabilities:
+      - research
+      - web_scraping
+      - data_extraction
+    resources:
+      memory_mb: 256
+      cpu_ms: 300000
+      max_connections: 32
+      max_queue_depth: 128
+    labels:
+      stage: "1"
+      team: data
+      cost_center: engineering
+    autoscaling:
+      enabled: true
+      metric: queue_depth
+      target_value: 50
+      scale_up_cooldown: 60s
+      scale_down_cooldown: 300s
+
+  - name: analyzers
+    kind: specialist
+    description: "Processes raw findings into structured insights"
+    replicas: 2
+    min_replicas: 1
+    max_replicas: 5
+    capabilities:
+      - analysis
+      - risk_assessment
+      - pattern_detection
+    resources:
+      memory_mb: 512
+      cpu_ms: 600000
+      max_connections: 16
+      max_queue_depth: 64
+    labels:
+      stage: "2"
+      team: ml
+      cost_center: engineering
+    autoscaling:
+      enabled: true
+      metric: cpu_utilization
+      target_value: 70
+      scale_up_cooldown: 30s
+      scale_down_cooldown: 180s
+
+  - name: reporters
+    kind: worker
+    description: "Generates final reports and distributes results"
+    replicas: 1
+    min_replicas: 1
+    max_replicas: 3
+    capabilities:
+      - reporting
+      - formatting
+    resources:
+      memory_mb: 128
+      cpu_ms: 120000
+      max_connections: 8
+      max_queue_depth: 32
+    labels:
+      stage: "3"
+      team: product
+      cost_center: product
+
+  - name: security-scanner
+    kind: monitor
+    description: "Continuous security scanning of all pipeline agents"
+    replicas: 1
+    min_replicas: 1
+    max_replicas: 1
+    capabilities:
+      - security_scan
+      - config_audit
+    resources:
+      memory_mb: 256
+      cpu_ms: 600000
+      max_connections: 48
+      max_queue_depth: 64
+    labels:
+      team: security
+      always_on: "true"
+
+# ---------------------------------------------------------------------------
+# Channels — DDAL communication links between pools
+# ---------------------------------------------------------------------------
+channels:
+  - name: research-to-analysis
+    from: researchers
+    to: analyzers
+    buffer_size: 64
+    bidirectional: false
+    description: "Carries ResearchFindings from stage 1 to stage 2"
+
+  - name: analysis-to-report
+    from: analyzers
+    to: reporters
+    buffer_size: 32
+    bidirectional: false
+    description: "Carries Analysis results from stage 2 to stage 3"
+
+  - name: security-broadcast
+    from: security-scanner
+    to: researchers
+    buffer_size: 16
+    bidirectional: true
+    description: "Security alerts and scan requests"
+
+  - name: security-analysis
+    from: security-scanner
+    to: analyzers
+    buffer_size: 16
+    bidirectional: true
+    description: "Security findings for analyzer pool"
+
+# ---------------------------------------------------------------------------
+# Global resource constraints
+# ---------------------------------------------------------------------------
+global_limits:
+  max_total_agents: 25
+  max_total_memory_mb: 8192
+  max_total_channels: 20
+
+# ---------------------------------------------------------------------------
+# Health and lifecycle policies
+# ---------------------------------------------------------------------------
+policies:
+  restart_policy: on_failure
+  max_restart_count: 5
+  restart_backoff: exponential
+  restart_backoff_base: 5s
+  restart_backoff_max: 300s
+
+  # Drain timeout when removing agents from a pool during scale-down.
+  drain_timeout: 30s
+
+  # How long to wait for an agent to initialize before declaring failure.
+  init_timeout: 60s

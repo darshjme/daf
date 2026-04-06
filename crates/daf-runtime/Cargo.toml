@@ -1,0 +1,34 @@
+[package]
+name = "daf-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Agent runtime: process isolation, resource limits, lifecycle management, health monitoring"
+
+[dependencies]
+daf-core = { path = "../daf-core" }
+daf-ddal = { path = "../daf-ddal" }
+daf-transport = { path = "../daf-transport" }
+daf-graph = { path = "../daf-graph" }
+daf-logger = { path = "../daf-logger" }
+daf-memory = { path = "../daf-memory" }
+daf-registry = { path = "../daf-registry" }
+daf-orchestrator = { path = "../daf-orchestrator" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+async-trait.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+crossbeam.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

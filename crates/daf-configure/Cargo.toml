@@ -1,0 +1,28 @@
+[package]
+name = "daf-configure"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Configuration management: task execution, idempotent operations, handler chains, role system"
+
+[dependencies]
+daf-core = { path = "../daf-core" }
+daf-ddal = { path = "../daf-ddal" }
+daf-graph = { path = "../daf-graph" }
+daf-transport = { path = "../daf-transport" }
+daf-vault = { path = "../daf-vault" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+async-trait.workspace = true
+dashmap.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

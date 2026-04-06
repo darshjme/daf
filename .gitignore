@@ -1,0 +1,15 @@
+/target
+**/*.rs.bk
+*.swp
+*.swo
+*~
+.DS_Store
+.env
+.env.*
+data/
+*.log
+*.pid
+*.sock
+.idea/
+.vscode/
+*.iml

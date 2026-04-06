@@ -1,0 +1,21 @@
+[package]
+name = "daf-example-configuration"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+daf-sdk = { path = "../../crates/daf-sdk" }
+daf-core = { path = "../../crates/daf-core" }
+daf-configure = { path = "../../crates/daf-configure" }
+daf-runtime = { path = "../../crates/daf-runtime" }
+daf-ddal = { path = "../../crates/daf-ddal" }
+daf-transport = { path = "../../crates/daf-transport" }
+tokio = { version = "1.44", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+async-trait = "0.1"
+uuid = { version = "1.16", features = ["v7"] }
+chrono = { version = "0.4", features = ["serde"] }

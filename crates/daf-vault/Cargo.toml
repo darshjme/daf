@@ -1,0 +1,28 @@
+[package]
+name = "daf-vault"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Secrets management: encrypted storage, key rotation, agent credential distribution"
+
+[dependencies]
+daf-core = { path = "../daf-core" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+async-trait.workspace = true
+ring.workspace = true
+blake3.workspace = true
+ed25519-dalek.workspace = true
+parking_lot.workspace = true
+sled.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

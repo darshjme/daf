@@ -1,0 +1,26 @@
+[package]
+name = "daf-integration-tests"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+daf-core = { path = "../../crates/daf-core" }
+daf-ddal = { path = "../../crates/daf-ddal" }
+daf-transport = { path = "../../crates/daf-transport" }
+daf-graph = { path = "../../crates/daf-graph" }
+daf-logger = { path = "../../crates/daf-logger" }
+daf-memory = { path = "../../crates/daf-memory" }
+daf-registry = { path = "../../crates/daf-registry" }
+daf-orchestrator = { path = "../../crates/daf-orchestrator" }
+daf-sdk = { path = "../../crates/daf-sdk" }
+daf-runtime = { path = "../../crates/daf-runtime" }
+tokio = { version = "1.44", features = ["full"] }
+serde_json = "1.0"
+tempfile = "3.15"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+uuid = { version = "1.16", features = ["v4", "v7"] }
+bytes = "1.10"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }

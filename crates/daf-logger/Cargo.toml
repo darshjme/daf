@@ -1,0 +1,30 @@
+[package]
+name = "daf-logger"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Structured conversation logging, KB extraction, and episode memory for DAF agents"
+
+[dependencies]
+daf-core = { path = "../daf-core" }
+daf-ddal = { path = "../daf-ddal" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+parking_lot.workspace = true
+blake3.workspace = true
+rocksdb.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

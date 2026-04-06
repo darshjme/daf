@@ -1,0 +1,80 @@
+name: daf-healthcheck
+kind: monitor
+version: "0.1.0"
+description: "Monitors agent health, tracks uptime, and triggers recovery actions"
+
+capabilities:
+  - name: health-probe
+    version: "1.0.0"
+    description: "Periodic health probing of all registered agents"
+  - name: uptime-tracking
+    version: "1.0.0"
+    description: "Track agent uptime, availability SLAs, and failure history"
+  - name: anomaly-detection
+    version: "1.0.0"
+    description: "Detect anomalous resource usage and performance degradation"
+  - name: recovery-trigger
+    version: "1.0.0"
+    description: "Trigger automatic recovery actions (restart, reschedule, alert)"
+  - name: metrics-aggregation
+    version: "1.0.0"
+    description: "Aggregate health metrics across the agent fleet"
+
+resource_limits:
+  max_memory_mb: 128
+  max_cpu_ms: 120000
+  max_connections: 128
+  max_message_queue: 1024
+
+health_check:
+  # The health checker itself is monitored by the runtime's internal watchdog
+  endpoint: /health
+  interval: 10s
+  timeout: 3s
+  failure_threshold: 5
+
+probe_config:
+  default_interval: 30s
+  timeout_per_agent: 5s
+  max_concurrent_probes: 50
+  retry_on_failure: 2
+  failure_window: 5m
+  failure_threshold: 3
+  recovery_actions:
+    - log_warning
+    - notify_orchestrator
+    - restart_agent
+
+metadata:
+  maintainer: "darsh@darshj.ai"
+  repository: "https://github.com/darshjme/daf"
+  license: "Apache-2.0"
+  category: observability
+  stability: stable
+
+dependencies:
+  - daf-core >= 0.1.0
+  - daf-registry >= 0.1.0
+  - daf-transport >= 0.1.0
+
+channels:
+  subscribes:
+    - agent.registered
+    - agent.deregistered
+    - agent.status.changed
+    - health.probe.request
+    - health.config.update
+  publishes:
+    - health.status.report
+    - health.agent.degraded
+    - health.agent.failed
+    - health.agent.recovered
+    - health.fleet.summary
+    - health.alert.critical
+
+tags:
+  - observability
+  - health
+  - monitoring
+  - uptime
+  - recovery

@@ -1,0 +1,602 @@
+// DDAL — Darshj's Distributed Agent Language
+// Binary protocol for inter-agent communication
+// Version 1.0.0
+//
+// Wire format: every message on the transport is a length-prefixed Frame.
+//   [4 bytes LE length][FlatBuffer Frame payload]
+//
+// Frames carry routing metadata, optional encryption headers, and an
+// inner payload whose format is declared by the PayloadFormat enum.
+// Application-level semantics live in the Message table; Frames are the
+// transport-level unit that the router and multiplexer operate on.
+
+namespace daf.ddal;
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+/// Discriminator for the wire-level frame type.
+enum FrameType : byte {
+  Handshake     = 0,
+  Data          = 1,
+  Ack           = 2,
+  Nack          = 3,
+  Ping          = 4,
+  Pong          = 5,
+  Route         = 6,
+  Subscribe     = 7,
+  Unsubscribe   = 8,
+  Close         = 9
+}
+
+/// Encoding of the inner payload bytes.
+enum PayloadFormat : byte {
+  Bincode     = 0,
+  MessagePack = 1,
+  Json        = 2,
+  Raw         = 3
+}
+
+/// Agent lifecycle state.
+enum AgentState : byte {
+  Initializing = 0,
+  Ready        = 1,
+  Busy         = 2,
+  Draining     = 3,
+  Shutdown     = 4,
+  Error        = 5
+}
+
+/// Task execution status.
+enum TaskStatus : byte {
+  Pending    = 0,
+  Queued     = 1,
+  Running    = 2,
+  Completed  = 3,
+  Failed     = 4,
+  Cancelled  = 5,
+  TimedOut   = 6
+}
+
+/// Severity level for events.
+enum EventSeverity : byte {
+  Trace    = 0,
+  Debug    = 1,
+  Info     = 2,
+  Warn     = 3,
+  Error    = 4,
+  Fatal    = 5
+}
+
+/// Conversation turn role.
+enum Role : byte {
+  System    = 0,
+  User      = 1,
+  Assistant = 2,
+  Tool      = 3
+}
+
+/// Compression applied to payload bytes.
+enum Compression : byte {
+  None   = 0,
+  Zstd   = 1,
+  Lz4    = 2,
+  Snappy = 3
+}
+
+/// Nack reason codes.
+enum NackReason : byte {
+  Unknown           = 0,
+  Timeout           = 1,
+  Overloaded        = 2,
+  Unauthorized      = 3,
+  BadPayload        = 4,
+  VersionMismatch   = 5,
+  RouteNotFound     = 6
+}
+
+// ---------------------------------------------------------------------------
+// Core wire-level tables
+// ---------------------------------------------------------------------------
+
+/// A single key-value metadata pair carried on frames and messages.
+table Header {
+  key:   string (required);
+  value: string (required);
+}
+
+/// The fundamental transport unit. Every byte sequence on the wire is one Frame.
+///
+/// Layout after length-prefix:
+///   [FrameType 1B][flags 1B][stream_id 4B][sequence 8B][...FlatBuffer fields]
+table Frame {
+  /// Discriminator — tells the receiver how to interpret the payload.
+  frame_type:     FrameType = Data;
+
+  /// Bitfield: 0x01 = compressed, 0x02 = encrypted, 0x04 = final-fragment.
+  flags:          ubyte = 0;
+
+  /// Multiplexed stream identifier. Zero means control stream.
+  stream_id:      uint32 = 0;
+
+  /// Monotonically increasing per stream. Used for ordering and ack/nack.
+  sequence:       uint64 = 0;
+
+  /// Wall-clock timestamp in microseconds since Unix epoch.
+  timestamp_us:   uint64 = 0;
+
+  /// Format of `payload` bytes.
+  payload_format: PayloadFormat = Bincode;
+
+  /// Compression applied to `payload`.
+  compression:    Compression = None;
+
+  /// The inner payload — interpretation depends on frame_type.
+  payload:        [ubyte];
+
+  /// Optional transport-level headers (tracing ids, auth tokens, etc.).
+  headers:        [Header];
+
+  /// For Ack/Nack: the sequence number being acknowledged.
+  ack_sequence:   uint64 = 0;
+
+  /// For Nack: machine-readable reason code.
+  nack_reason:    NackReason = Unknown;
+
+  /// For Nack: optional human-readable detail.
+  nack_detail:    string;
+}
+
+// ---------------------------------------------------------------------------
+// Handshake
+// ---------------------------------------------------------------------------
+
+/// Capabilities that an agent advertises during handshake.
+table Capability {
+  name:    string (required);
+  version: string;
+}
+
+/// Sent by the initiating side of a connection.
+table HandshakeRequest {
+  /// Protocol version the client wants to speak (semver string).
+  protocol_version: string (required);
+
+  /// Unique identity of the connecting agent.
+  agent_id:         string (required);
+
+  /// Human-readable agent name.
+  agent_name:       string;
+
+  /// Payload formats the client can produce and consume.
+  supported_formats: [PayloadFormat];
+
+  /// Compression algorithms the client supports.
+  supported_compression: [Compression];
+
+  /// Capabilities the agent offers (tool names, skills, etc.).
+  capabilities:     [Capability];
+
+  /// Optional bearer token or signed JWT for authentication.
+  auth_token:       string;
+
+  /// Additional metadata.
+  metadata:         [Header];
+}
+
+/// Reply from the accepting side.
+table HandshakeResponse {
+  /// Whether the handshake is accepted.
+  accepted:         bool = true;
+
+  /// The protocol version the server has chosen (must be <= requested).
+  protocol_version: string (required);
+
+  /// The server's own agent id.
+  agent_id:         string (required);
+
+  /// Negotiated payload format for this session.
+  chosen_format:    PayloadFormat = Bincode;
+
+  /// Negotiated compression.
+  chosen_compression: Compression = None;
+
+  /// Reason string if rejected.
+  reject_reason:    string;
+
+  /// Server-side capabilities.
+  capabilities:     [Capability];
+
+  /// Session token valid for subsequent frames.
+  session_token:    string;
+
+  /// Additional metadata.
+  metadata:         [Header];
+}
+
+// ---------------------------------------------------------------------------
+// Routing / Envelope
+// ---------------------------------------------------------------------------
+
+/// Routing wrapper that carries a message through a mesh of agents.
+table Envelope {
+  /// Globally unique message id (UUIDv7 recommended).
+  message_id:    string (required);
+
+  /// Correlation id linking request/response pairs.
+  correlation_id: string;
+
+  /// Originator agent id.
+  source:        string (required);
+
+  /// Final destination agent id (empty = broadcast to topic).
+  destination:   string;
+
+  /// Ordered list of agent ids this envelope should traverse.
+  route:         [string];
+
+  /// Current index into `route` — incremented at each hop.
+  hop:           uint16 = 0;
+
+  /// Topic for pub/sub fan-out (used when destination is empty).
+  topic:         string;
+
+  /// TTL in hops — envelope is dropped when hop exceeds this.
+  ttl:           uint16 = 16;
+
+  /// Priority 0 (highest) to 255 (lowest).
+  priority:      ubyte = 128;
+
+  /// Deadline as Unix microsecond timestamp. Zero = no deadline.
+  deadline_us:   uint64 = 0;
+
+  /// The serialized application-level message.
+  payload:       [ubyte];
+
+  /// Format of `payload`.
+  payload_format: PayloadFormat = Bincode;
+
+  /// Transport headers propagated across hops.
+  headers:       [Header];
+}
+
+// ---------------------------------------------------------------------------
+// Application-level Message
+// ---------------------------------------------------------------------------
+
+/// A typed content block inside a message.
+table ContentBlock {
+  /// MIME type (e.g. "text/plain", "application/json", "image/png").
+  mime_type: string (required);
+
+  /// Text content — mutually exclusive with `data`.
+  text:      string;
+
+  /// Binary content — mutually exclusive with `text`.
+  data:      [ubyte];
+}
+
+/// Tool invocation embedded in a message.
+table ToolCall {
+  /// Unique id for this call (used to match results).
+  call_id:   string (required);
+
+  /// Tool / function name.
+  name:      string (required);
+
+  /// JSON-encoded arguments.
+  arguments: string;
+}
+
+/// Result returned from a tool invocation.
+table ToolResult {
+  /// Matches a ToolCall.call_id.
+  call_id:   string (required);
+
+  /// Whether the tool succeeded.
+  success:   bool = true;
+
+  /// Serialized output.
+  output:    string;
+
+  /// Optional error detail.
+  error:     string;
+}
+
+/// The primary application-level unit exchanged between agents.
+table Message {
+  /// Message id (same as Envelope.message_id when wrapped).
+  id:            string (required);
+
+  /// Wall-clock timestamp in microseconds since Unix epoch.
+  timestamp_us:  uint64 = 0;
+
+  /// Role of the sender in the conversation.
+  role:          Role = Assistant;
+
+  /// Ordered content blocks (multi-modal support).
+  content:       [ContentBlock];
+
+  /// Tool calls requested by this message.
+  tool_calls:    [ToolCall];
+
+  /// Tool results carried by this message.
+  tool_results:  [ToolResult];
+
+  /// Parent message id for threaded conversations.
+  parent_id:     string;
+
+  /// Arbitrary key-value annotations.
+  metadata:      [Header];
+}
+
+// ---------------------------------------------------------------------------
+// Conversation
+// ---------------------------------------------------------------------------
+
+/// A single turn in a conversation history.
+table ConversationTurn {
+  /// Turn index (0-based).
+  index:        uint32 = 0;
+
+  /// The message for this turn.
+  message:      Message;
+
+  /// Token count estimate for this turn.
+  token_count:  uint32 = 0;
+
+  /// Model that generated this turn (empty for user turns).
+  model:        string;
+
+  /// Latency in milliseconds to produce this turn.
+  latency_ms:   uint32 = 0;
+}
+
+/// A conversation is an ordered list of turns with shared context.
+table Conversation {
+  /// Unique conversation id.
+  id:           string (required);
+
+  /// System prompt / constitution for the conversation.
+  system:       string;
+
+  /// The ordered sequence of turns.
+  turns:        [ConversationTurn];
+
+  /// Conversation-level metadata.
+  metadata:     [Header];
+}
+
+// ---------------------------------------------------------------------------
+// Agent Manifest
+// ---------------------------------------------------------------------------
+
+/// Resource limits for an agent.
+table ResourceLimits {
+  /// Maximum memory in bytes. Zero = unlimited.
+  max_memory_bytes:  uint64 = 0;
+
+  /// Maximum CPU time per task in milliseconds. Zero = unlimited.
+  max_cpu_ms:        uint64 = 0;
+
+  /// Maximum concurrent tasks.
+  max_concurrency:   uint32 = 1;
+
+  /// Maximum payload size in bytes this agent will accept.
+  max_payload_bytes: uint32 = 16777216;  // 16 MiB default
+}
+
+/// Declares an agent's identity, capabilities, and resource profile.
+/// Shared during handshake and stored in the registry.
+table AgentManifest {
+  /// Unique agent identifier.
+  agent_id:     string (required);
+
+  /// Human-readable name.
+  name:         string (required);
+
+  /// Semantic version of the agent implementation.
+  version:      string;
+
+  /// Free-form description.
+  description:  string;
+
+  /// Current lifecycle state.
+  state:        AgentState = Ready;
+
+  /// Topics this agent subscribes to.
+  subscriptions: [string];
+
+  /// Capabilities (tools / skills) this agent provides.
+  capabilities: [Capability];
+
+  /// Resource constraints.
+  limits:       ResourceLimits;
+
+  /// Labels for scheduling and affinity (e.g. "gpu:true", "region:us-east").
+  labels:       [Header];
+
+  /// Heartbeat interval this agent promises, in milliseconds.
+  heartbeat_interval_ms: uint32 = 5000;
+}
+
+// ---------------------------------------------------------------------------
+// Task
+// ---------------------------------------------------------------------------
+
+/// Specification of a unit of work assigned to an agent.
+table TaskSpec {
+  /// Unique task identifier.
+  task_id:      string (required);
+
+  /// Human-readable task name.
+  name:         string;
+
+  /// Detailed instructions or prompt.
+  instructions: string;
+
+  /// Agent id that should execute this task (empty = any capable agent).
+  assignee:     string;
+
+  /// Required capabilities to execute.
+  required_capabilities: [string];
+
+  /// Priority 0 (highest) to 255 (lowest).
+  priority:     ubyte = 128;
+
+  /// Deadline as Unix microsecond timestamp. Zero = no deadline.
+  deadline_us:  uint64 = 0;
+
+  /// Maximum execution time in milliseconds. Zero = no limit.
+  timeout_ms:   uint64 = 0;
+
+  /// Serialized input data.
+  input:        [ubyte];
+
+  /// Format of `input`.
+  input_format: PayloadFormat = Bincode;
+
+  /// Parent task id for sub-task hierarchies.
+  parent_task_id: string;
+
+  /// IDs of tasks that must complete before this one starts.
+  depends_on:   [string];
+
+  /// Retry count — how many times to retry on failure.
+  max_retries:  uint8 = 0;
+
+  /// Arbitrary metadata.
+  metadata:     [Header];
+}
+
+/// Result produced after task execution.
+table TaskResult {
+  /// Matches the originating TaskSpec.task_id.
+  task_id:      string (required);
+
+  /// Final status.
+  status:       TaskStatus = Completed;
+
+  /// Serialized output data.
+  output:       [ubyte];
+
+  /// Format of `output`.
+  output_format: PayloadFormat = Bincode;
+
+  /// Human-readable error if status is Failed.
+  error:        string;
+
+  /// Wall-clock execution time in milliseconds.
+  duration_ms:  uint64 = 0;
+
+  /// Which agent executed the task.
+  executor:     string;
+
+  /// How many retries were consumed.
+  retries_used: uint8 = 0;
+
+  /// Arbitrary metadata.
+  metadata:     [Header];
+}
+
+// ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
+/// A structured event emitted by any component in the mesh.
+table Event {
+  /// Unique event id.
+  event_id:     string (required);
+
+  /// Dot-separated event type (e.g. "agent.started", "task.failed").
+  event_type:   string (required);
+
+  /// Severity level.
+  severity:     EventSeverity = Info;
+
+  /// Wall-clock timestamp in microseconds since Unix epoch.
+  timestamp_us: uint64 = 0;
+
+  /// Agent that emitted the event.
+  source:       string;
+
+  /// JSON-encoded event data.
+  data:         string;
+
+  /// Correlation id to link related events.
+  correlation_id: string;
+
+  /// Span id for distributed tracing.
+  span_id:      string;
+
+  /// Parent span id.
+  parent_span_id: string;
+
+  /// Tags for filtering.
+  tags:         [Header];
+}
+
+// ---------------------------------------------------------------------------
+// Health Checks
+// ---------------------------------------------------------------------------
+
+/// Health check request — sent as a Ping frame payload or via the control stream.
+table HealthCheckRequest {
+  /// Agent whose health is being queried (empty = the receiver).
+  agent_id:     string;
+
+  /// If true, include detailed component-level checks.
+  detailed:     bool = false;
+}
+
+/// Status of a single health sub-component.
+table ComponentHealth {
+  /// Component name (e.g. "memory_store", "llm_backend").
+  name:         string (required);
+
+  /// True if healthy.
+  healthy:      bool = true;
+
+  /// Optional status message.
+  message:      string;
+
+  /// Latency to check this component in milliseconds.
+  latency_ms:   uint32 = 0;
+}
+
+/// Health check response.
+table HealthCheckResponse {
+  /// Agent reporting health.
+  agent_id:        string (required);
+
+  /// Overall health.
+  healthy:         bool = true;
+
+  /// Current agent state.
+  state:           AgentState = Ready;
+
+  /// Uptime in seconds.
+  uptime_secs:     uint64 = 0;
+
+  /// Number of tasks currently in flight.
+  active_tasks:    uint32 = 0;
+
+  /// Resident memory in bytes.
+  memory_bytes:    uint64 = 0;
+
+  /// Per-component breakdown (only if requested with detailed=true).
+  components:      [ComponentHealth];
+
+  /// Human-readable status message.
+  message:         string;
+}
+
+// ---------------------------------------------------------------------------
+// Root type
+// ---------------------------------------------------------------------------
+
+root_type Frame;
+
+file_identifier "DDAL";
+file_extension  "ddal";
