@@ -524,7 +524,7 @@ impl MemoryStore for RocksStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::MemoryKind;
+    use crate::types::{MemoryKind, MemoryTier};
     use serde_json::json;
 
     async fn store_and_retrieve(store: &dyn MemoryStore) {

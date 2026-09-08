@@ -208,13 +208,14 @@ pub async fn execute_recall(
 ) -> crate::error::MemoryResult<RecallResult> {
     let start = Instant::now();
 
-    // Step 1: Get initial candidates.
+    // Step 1: Fetch every candidate before filtering and ranking. The store
+    // API cannot apply these filters or ranking, so limiting here can discard
+    // valid matches and the highest-ranked result. Apply the limit only below.
     let candidates = if let Some(ref search) = query.content_search {
         // Use content search if specified — let the store do initial filtering.
-        store.search(search, query.result_limit * 10).await?
+        store.search(search, usize::MAX).await?
     } else {
-        // Otherwise scan all memories (bounded).
-        store.list_all(query.result_limit * 10).await?
+        store.list_all(usize::MAX).await?
     };
 
     // Step 2: Apply filters.
@@ -433,6 +434,41 @@ mod tests {
         let query = RecallQuery::new().by_tags(vec!["x".into(), "y".into()]);
         let result = execute_recall(&store, &query).await.unwrap();
         assert_eq!(result.memories.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn execute_recall_filters_and_ranks_beyond_old_candidate_limit() {
+        // Sled orders these explicit keys, placing both valid matches after
+        // the old ten-candidate boundary for a one-result query.
+        let store = crate::store::SledStore::temporary().unwrap();
+        let best_id = crate::types::MemoryId::from_uuid(uuid::Uuid::from_u128(12));
+        for index in 1..=12 {
+            let mut memory = Memory::new(MemoryKind::Semantic, json!("needle"))
+                .with_tags(vec![if index > 10 { "target" } else { "noise" }.into()])
+                .with_importance(index as f64 / 12.0);
+            memory.id = crate::types::MemoryId::from_uuid(uuid::Uuid::from_u128(index));
+            store.store(&memory).await.unwrap();
+        }
+
+        // Exercise both candidate sources and ensure the limit affects only
+        // returned memories, not total_matches or global ranking.
+        for content_search in [false, true] {
+            let mut query = RecallQuery::new()
+                .by_tags(vec!["target".into()])
+                .strategy(RecallStrategy::MostImportant)
+                .limit(1);
+            if content_search {
+                query = query.by_content_search("needle");
+            }
+            let result = execute_recall(&store, &query).await.unwrap();
+            assert_eq!(result.total_matches, 2);
+            assert_eq!(result.memories.len(), 1);
+            assert_eq!(result.memories[0].id, best_id);
+
+            let result = execute_recall(&store, &query.limit(0)).await.unwrap();
+            assert_eq!(result.total_matches, 2);
+            assert!(result.memories.is_empty());
+        }
     }
 
     #[test]

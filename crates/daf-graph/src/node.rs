@@ -148,9 +148,11 @@ pub struct TaskSpec {
     pub task_type: String,
     /// Serialized parameters for the task.
     pub params: serde_json::Value,
-    /// Maximum time the task is allowed to run before being killed.
+    /// Maximum duration of each handler attempt; timeout drops the handler future.
+    /// The shorter of this limit and the executor timeout applies.
     pub timeout: Option<Duration>,
-    /// Number of retry attempts on failure (0 = no retries).
+    /// Additional attempts after handler error or timeout (0 = no retries).
+    /// Cancellation is never retried. Handlers must tolerate repeated execution.
     pub max_retries: u32,
 }
 
