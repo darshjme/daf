@@ -1,211 +1,91 @@
-# DAF — Darshj's Agent Framework
+![DAF — graphs, communication and memory for agents](assets/header.svg)
 
-**A unified infrastructure layer for orchestrating AI agents. Binary communication, episodic memory, DAG execution, declarative provisioning — everything agents need to work together, built in Rust.**
+# Darshj’s Agent Framework
 
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
-[![Crates.io](https://img.shields.io/crates/v/daf.svg)](https://crates.io/crates/daf)
-[![CI](https://github.com/darshjme/daf/actions/workflows/ci.yml/badge.svg)](https://github.com/darshjme/daf/actions/workflows/ci.yml)
+**Rust building blocks for coordinating agents: what runs, how agents communicate, and what they remember.**
 
----
+DAF brings task graphs, a binary communication protocol, memory stores and orchestration types into one workspace. You can work with the libraries directly and supply the task handlers and integrations your system needs.
 
-## What is DAF
+**Status: early development, v0.1.0.** The libraries and the CLI are at different stages. Several CLI commands still demonstrate intended behavior instead of invoking the underlying subsystem. Start with the libraries; see [implementation status](#implementation-status) before using the CLI for operational work.
 
-DAF is an operating system for AI agents. It handles the hard infrastructure problems — how agents find each other, how they communicate efficiently, how they remember what happened, how they coordinate work across complex task graphs — so you can focus on what your agents actually do. Think of it as Kubernetes for agents: a runtime, a scheduler, a network layer, and a state store, all designed from scratch for agentic workloads.
+[DDAL protocol](docs/DDAL.md) · [Memory design](docs/MEMORY.md) · [Source](crates/) · [Apache 2.0](LICENSE)
 
-## Why DAF Exists
+## The building blocks
 
-I grew up on open-source. The community taught me everything. AI agents helped me ship faster, think clearer, build bigger. But agents today are disconnected — they can't talk to each other, can't remember what they learned, can't coordinate on complex work.
+| Area | Crates | Purpose |
+| :--- | :--- | :--- |
+| Execution | [`daf-graph`](crates/daf-graph/), [`daf-orchestrator`](crates/daf-orchestrator/) | Dependency graphs, execution waves, task handlers and mission structure. |
+| Communication | [`daf-ddal`](crates/daf-ddal/), [`daf-transport`](crates/daf-transport/) | Binary frames, serialization, channels, conversations and transport components. |
+| Memory | [`daf-memory`](crates/daf-memory/), [`daf-logger`](crates/daf-logger/) | Memory stores, episodes, recall, consolidation and conversation records. |
+| Agent interfaces | [`daf-core`](crates/daf-core/), [`daf-sdk`](crates/daf-sdk/), [`daf-registry`](crates/daf-registry/) | Shared types, agent construction, registration and discovery. |
+| Runtime and operations | [`daf-runtime`](crates/daf-runtime/), [`daf-provision`](crates/daf-provision/), [`daf-configure`](crates/daf-configure/), [`daf-vault`](crates/daf-vault/) | Lifecycle, topology planning, configuration and secret-store implementations. |
 
-DAF gives agents a proper operating system. Binary communication (DDAL), episodic memory, sprint-based orchestration, declarative provisioning. If Ansible configures servers and Terraform provisions infrastructure, DAF does both — for agents.
+DDAL provides a Tokio frame codec, stream identifiers, checksums, channel multiplexing and conversation tracking. Payload serializers include Bincode, MessagePack and JSON. The graph executor schedules work subject to dependencies and concurrency limits, with timeout, cancellation and failure handling.
 
-This is my payback to the community that raised me.
-
-*— [Darshankumar Joshi](https://darshj.ai)*
-
-## Architecture
+These are separate components. Your integration connects them; the diagram below is a typical composition, not a claim that every CLI path already does so.
 
 ```mermaid
-graph TB
-    CLI["daf-cli"]
-    RT["daf-runtime"]
-    ORCH["daf-orchestrator"]
-    GR["daf-graph"]
-    REG["daf-registry"]
-    MEM["daf-memory"]
-    LOG["daf-logger"]
-    TR["daf-transport"]
-    DDAL["daf-ddal"]
-    AGENTS["Agents"]
-    PROV["daf-provision"]
-    CONF["daf-configure"]
-    VAULT["daf-vault"]
-    SDK["daf-sdk"]
-
-    CLI --> RT
-    SDK --> RT
-    RT --> ORCH
-    ORCH --> GR
-    ORCH --> REG
-    ORCH --> MEM
-    ORCH --> LOG
-    RT --> TR
-    TR --> DDAL
-    DDAL --> AGENTS
-    RT --> PROV
-    RT --> CONF
-    RT --> VAULT
-
-    style CLI fill:#1f6feb,color:#fff
-    style RT fill:#238636,color:#fff
-    style ORCH fill:#8957e5,color:#fff
-    style DDAL fill:#da3633,color:#fff
-    style AGENTS fill:#f0883e,color:#fff
-    style MEM fill:#3fb950,color:#fff
-    style TR fill:#388bfd,color:#fff
+flowchart LR
+    App[Your application] --> Graph[DAF graph executor]
+    Graph --> Handler[Your task handlers]
+    Handler --> Link[DDAL and transport]
+    Link --> Agents[Agents]
+    Handler --> Memory[Memory and conversation stores]
 ```
 
-## Key Features
+## Start from source
 
-**DDAL Binary Protocol** — Custom binary socket protocol purpose-built for agent-to-agent communication. Frame-level multiplexing, conversation tracking, and three serialization formats (Bincode, MessagePack, JSON). Sub-millisecond overhead. See [docs/DDAL.md](docs/DDAL.md).
+Use Rust **1.85 or newer** with Cargo. The workspace uses the 2024 edition.
 
-**Episodic Memory** — Three-tier memory system (hot/warm/cold) with automatic promotion and demotion. Agents record episodes, consolidate them into semantic knowledge, and recall relevant context on demand. Built on sled and RocksDB. See [docs/MEMORY.md](docs/MEMORY.md).
+```sh
+git clone https://github.com/darshjme/daf.git
+cd daf
 
-**DAG Execution** — Work is organized as missions containing phases, phases containing waves, waves containing tasks. The orchestrator builds a directed acyclic graph from task dependencies and executes waves in parallel using petgraph.
-
-**Terraform-style Provisioning** — Declare what agents you need, what resources they require, and what connections exist between them. DAF plans the delta, applies it, and tracks state. `daf plan` shows you what will change. `daf apply` makes it happen.
-
-**Ansible-style Configuration** — Playbooks describe how agents should be configured. Plays target agent groups, tasks invoke modules, handlers react to changes. Idempotent by design.
-
-**Vault Secrets** — Ed25519-signed, Blake3-hashed secret storage. Agents request secrets through capability-based access policies. No plaintext on disk, ever.
-
-**Conversation Logging and KB Extraction** — Every agent conversation is logged with full turn-level detail. The logger extracts structured knowledge base entries from conversation patterns, building a searchable corpus that agents can query.
-
-## Quick Start
-
-### Install
-
-```bash
-cargo install daf
+# Explore the core components without building every subsystem.
+cargo test --locked -p daf-core -p daf-ddal -p daf-graph
+cargo doc --locked -p daf-graph -p daf-ddal --no-deps --open
 ```
 
-### Initialize a project
+For the complete workspace:
 
-```bash
-daf init my-agent-system
-cd my-agent-system
+```sh
+cargo test --locked --workspace
 ```
 
-### Define your agents
+The full workspace includes native storage dependencies such as RocksDB and may require a C/C++ toolchain, CMake and libclang. The commands above are local verification commands; GitHub Actions is disabled.
 
-```toml
-# agents/scanner.toml
-[agent]
-name = "scanner"
-runtime = "python"
-entry = "scan.py"
+### A small dependency graph
 
-[agent.memory]
-tier = "hot"
-capacity = "256MB"
+```rust
+use daf_graph::{Edge, EdgeKind, ExecutionGraph, Node, NodeKind, WaveScheduler};
 
-[agent.capabilities]
-network = true
-filesystem = ["read"]
+let mut graph = ExecutionGraph::new("inspect-change-verify");
+let inspect = graph.add_node(Node::new(NodeKind::Task, "inspect"));
+let change = graph.add_node(Node::new(NodeKind::Task, "change"));
+let verify = graph.add_node(Node::new(NodeKind::Task, "verify"));
+
+graph.add_edge(Edge::new(inspect, change, EdgeKind::DependsOn))?;
+graph.add_edge(Edge::new(change, verify, EdgeKind::DependsOn))?;
+
+let plan = WaveScheduler::new().plan_waves(&graph)?;
+assert_eq!(plan.waves.len(), 3);
 ```
 
-### Provision and run
+This builds a plan. To execute work, implement [`TaskHandler`](crates/daf-graph/src/executor.rs) and use `GraphExecutor`. The graph library can also export DOT and Mermaid representations.
 
-```bash
-# See what will be created
-daf plan
+## Implementation status
 
-# Apply the configuration
-daf apply
+The codebase contains implementations of the graph engine, DDAL codec, memory stores and supporting libraries. It is not yet a complete distributed agent platform.
 
-# Launch the system
-daf up
+- **CLI integration:** agent operations, mission execution, provisioning and configuration still contain demonstration paths. [`daf status`](crates/daf-cli/src/commands/status.rs) is not a live cluster inventory.
+- **Vault CLI:** [`vault get`](crates/daf-cli/src/commands/vault.rs) returns a placeholder; it is not wired to the encrypted store. The vault library is separate from this command.
+- **Distributed runtime:** node join/leave transport and live configuration reload remain incomplete in [`daf-runtime`](crates/daf-runtime/src/).
+- **Examples:** [`examples/`](examples/) contains code and configuration references. It is not a validated deployment catalogue.
 
-# Check agent status
-daf status
-```
+Read these paths before treating a successful CLI message as evidence that an operation occurred. Performance claims need a reproducible workload; there is no universal latency or speedup guarantee here.
 
-### Send a message between agents
+## Explore and contribute
 
-```bash
-daf send scanner --message '{"target": "https://example.com", "depth": 3}'
-```
+Start with the [graph API](crates/daf-graph/src/lib.rs), [DDAL codec](crates/daf-ddal/src/codec.rs), [memory manager](crates/daf-memory/src/manager.rs), or [Rust SDK](crates/daf-sdk/src/lib.rs). Contributions that connect a command to real execution, add a focused regression test, or improve protocol documentation are useful starting points.
 
-### Watch conversations in real time
-
-```bash
-daf logs --follow --agent scanner
-```
-
-## DDAL Protocol
-
-DDAL (DAF Direct Agent Link) is the binary wire protocol that agents use to communicate. It replaces JSON-over-HTTP with a compact binary frame format optimized for high-frequency, low-latency agent messaging.
-
-Key design decisions:
-- **Binary frames** with magic bytes, type tags, stream IDs, and Blake3 checksums
-- **Channel multiplexing** — multiple logical conversations over a single TCP connection
-- **Conversation-native** — every frame carries a conversation ID and turn number, so the system can reconstruct full dialogues for analysis and KB extraction
-- **Three serialization tiers** — Bincode for speed, MessagePack for interoperability, JSON for debugging
-
-Full specification: [docs/DDAL.md](docs/DDAL.md)
-
-## Crate Map
-
-| Crate | Description | Status |
-|-------|-------------|--------|
-| `daf-core` | Shared types, traits, error types, and configuration primitives | ![status](https://img.shields.io/badge/status-active-brightgreen) |
-| `daf-ddal` | DDAL binary protocol: frame codec, serialization, handshake | ![status](https://img.shields.io/badge/status-active-brightgreen) |
-| `daf-transport` | TCP/TLS transport layer, connection pooling, reconnection | ![status](https://img.shields.io/badge/status-active-brightgreen) |
-| `daf-memory` | Three-tier episodic memory system (sled + RocksDB) | ![status](https://img.shields.io/badge/status-active-brightgreen) |
-| `daf-graph` | DAG construction and wave-parallel execution engine | ![status](https://img.shields.io/badge/status-active-brightgreen) |
-| `daf-orchestrator` | Mission/phase/wave lifecycle management | ![status](https://img.shields.io/badge/status-active-brightgreen) |
-| `daf-registry` | Agent registration, discovery, and health checking | ![status](https://img.shields.io/badge/status-active-brightgreen) |
-| `daf-logger` | Structured conversation logging and KB extraction | ![status](https://img.shields.io/badge/status-active-brightgreen) |
-| `daf-provision` | Terraform-style declarative agent provisioning | ![status](https://img.shields.io/badge/status-active-brightgreen) |
-| `daf-configure` | Ansible-style playbook-based agent configuration | ![status](https://img.shields.io/badge/status-active-brightgreen) |
-| `daf-vault` | Secret management with Ed25519 signing and access policies | ![status](https://img.shields.io/badge/status-active-brightgreen) |
-| `daf-runtime` | Agent lifecycle runtime: spawn, monitor, restart, teardown | ![status](https://img.shields.io/badge/status-active-brightgreen) |
-| `daf-cli` | Command-line interface for all DAF operations | ![status](https://img.shields.io/badge/status-active-brightgreen) |
-| `daf-sdk` | Rust SDK for building agents that run on DAF | ![status](https://img.shields.io/badge/status-active-brightgreen) |
-
-## Examples
-
-The `examples/` directory contains working configurations:
-
-- **[basic-agent](examples/basic-agent/)** — Single agent with memory and logging
-- **[multi-agent](examples/multi-agent/)** — Multiple agents communicating over DDAL
-- **[infrastructure](examples/infrastructure/)** — Full provisioning and configuration setup
-- **[configuration](examples/configuration/)** — Ansible-style playbook examples
-
-Run any example:
-
-```bash
-cd examples/basic-agent
-daf apply && daf up
-```
-
-## Documentation
-
-- [Architecture](ARCHITECTURE.md) — System design, component interactions, execution model
-- [DDAL Protocol](docs/DDAL.md) — Wire protocol specification
-- [Memory System](docs/MEMORY.md) — Three-tier memory architecture
-- [Contributing](CONTRIBUTING.md) — Development setup, PR process, code style
-
-## Contributing
-
-DAF is open source under the Apache 2.0 license. Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide.
-
-The short version: fork, branch from `main`, write tests, run `cargo fmt` and `cargo clippy`, open a PR.
-
-## License
-
-Apache 2.0 — see [LICENSE](LICENSE) for the full text.
-
----
-
-Built by [Darshankumar Joshi](https://darshj.ai) | [GitHub](https://github.com/darshjme) | [Documentation](https://docs.daf.darshj.ai)
+Created and maintained by **[Darshankumar Joshi](https://github.com/darshjme)**. Licensed under [Apache 2.0](LICENSE).
