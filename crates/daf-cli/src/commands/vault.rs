@@ -3,11 +3,9 @@
 //! Wraps daf-vault operations: initialize, store, retrieve, list, and rotate
 //! secrets with masked terminal output for sensitive values.
 
-use anyhow::{bail, Result};
-use console::style;
-use dialoguer::{Confirm, Input, Password};
+use anyhow::{Result, bail};
+use dialoguer::Password;
 
-use crate::display::{format_table, section, status_icon};
 use crate::Cli;
 
 /// Subcommands for `daf vault`.
@@ -51,187 +49,82 @@ pub struct RotateArgs {
     pub value: Option<String>,
 }
 
-/// Dispatch vault subcommands.
-pub async fn exec(cmd: &VaultCommand, cli: &Cli) -> Result<()> {
-    match cmd {
-        VaultCommand::Init => exec_init(cli).await,
-        VaultCommand::Set(args) => exec_set(args, cli).await,
-        VaultCommand::Get(args) => exec_get(args, cli).await,
-        VaultCommand::List => exec_list(cli).await,
-        VaultCommand::Rotate(args) => exec_rotate(args, cli).await,
+/// Persist secrets through the encrypted Sled vault; no sample values.
+pub async fn exec(cmd: &VaultCommand, _cli: &Cli) -> Result<()> {
+    use daf_vault::{AccessPolicy, AuditLog, SecretKind, SledVaultStore, VaultStore};
+    use std::{path::PathBuf, sync::Arc};
+    let path = std::env::var_os("DAF_VAULT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".daf/vault"));
+    if !matches!(cmd, VaultCommand::Init) && !path.exists() {
+        bail!("Vault not initialized; run daf vault init");
     }
-}
-
-// ---------------------------------------------------------------------------
-// init
-// ---------------------------------------------------------------------------
-
-async fn exec_init(_cli: &Cli) -> Result<()> {
-    eprintln!(
-        "{} Initializing DAF vault\n",
-        style("[vault]").cyan().bold(),
-    );
-
-    eprintln!(
-        "  {}",
-        style("The master password encrypts all secrets in the vault.").dim(),
-    );
-    eprintln!(
-        "  {}",
-        style("It cannot be recovered if lost. Choose a strong passphrase.").dim(),
-    );
-    eprintln!();
-
-    let password = Password::new()
-        .with_prompt("Master password")
-        .with_confirmation("Confirm password", "Passwords do not match")
-        .interact()?;
-
+    if matches!(cmd, VaultCommand::Init) && path.exists() {
+        bail!("Vault path already exists; refusing to overwrite it");
+    }
+    let password = match std::env::var("DAF_VAULT_PASSWORD") {
+        Ok(value) => value,
+        Err(_) => {
+            let prompt = Password::new().with_prompt("Master password");
+            if matches!(cmd, VaultCommand::Init) {
+                prompt
+                    .with_confirmation("Confirm password", "Passwords do not match")
+                    .interact()?
+            } else {
+                prompt.interact()?
+            }
+        }
+    };
     if password.len() < 12 {
-        bail!("master password must be at least 12 characters");
+        bail!("Master password must be at least 12 characters");
     }
-
-    // In production: call daf_vault::KeyRing::initialize() with the
-    // PBKDF2-derived master key, create the sled store at .daf/vault.
-    eprintln!(
-        "\n{} Vault initialized at {}",
-        style("\u{2714}").green().bold(),
-        style(".daf/vault").underlined(),
-    );
-    eprintln!(
-        "  {}",
-        style("The vault is now unsealed for this session.").dim(),
-    );
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// set
-// ---------------------------------------------------------------------------
-
-async fn exec_set(args: &SetArgs, _cli: &Cli) -> Result<()> {
-    let value = match &args.value {
-        Some(v) => v.clone(),
-        None => {
-            Password::new()
-                .with_prompt(format!("Value for '{}'", args.name))
-                .interact()?
+    let store = SledVaultStore::open(&path, Arc::new(AuditLog::new()))?;
+    if matches!(cmd, VaultCommand::Init) {
+        store.initialize(password.as_bytes())?;
+        eprintln!("Vault initialized at {}", path.display());
+        return Ok(());
+    }
+    store.unseal(password.as_bytes())?;
+    match cmd {
+        VaultCommand::Set(args) => {
+            let value = match &args.value {
+                Some(value) => value.clone(),
+                None => Password::new().with_prompt("Secret value").interact()?,
+            };
+            store
+                .store_secret(
+                    &args.name,
+                    SecretKind::Custom("cli".into()),
+                    value.as_bytes(),
+                    AccessPolicy::default(),
+                )
+                .await?;
+            eprintln!("Stored {}", args.name);
         }
-    };
-
-    // In production: call vault.set(&args.name, &value) which envelope-encrypts
-    // and stores in the vault backend.
-    let _ = value;
-
-    eprintln!(
-        "{} Secret {} stored",
-        style("\u{2714}").green().bold(),
-        style(&args.name).bold(),
-    );
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// get
-// ---------------------------------------------------------------------------
-
-async fn exec_get(args: &GetArgs, _cli: &Cli) -> Result<()> {
-    // In production: call vault.get(&args.name) which decrypts and returns
-    // the secret value. Audit log entry is recorded.
-    let value = "s3cr3t-v4lu3-placeholder";
-
-    if args.raw {
-        println!("{value}");
-    } else {
-        eprintln!(
-            "{} {}",
-            style("[vault]").cyan().bold(),
-            style(&args.name).bold(),
-        );
-        println!("{value}");
-    }
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// list
-// ---------------------------------------------------------------------------
-
-async fn exec_list(_cli: &Cli) -> Result<()> {
-    eprintln!(
-        "{} Vault contents:\n",
-        style("[vault]").cyan().bold(),
-    );
-
-    // Placeholder — in production this lists from the vault store.
-    let mut table = format_table(&["", "Name", "Kind", "Version", "Last Rotated"]);
-
-    let secrets = [
-        ("api-key", "token", "v1", "2026-04-05 14:22"),
-        ("db-password", "password", "v3", "2026-04-01 09:15"),
-        ("tls-cert", "certificate", "v1", "2026-03-20 11:00"),
-        ("signing-key", "key", "v2", "2026-03-28 16:45"),
-    ];
-
-    for (name, kind, version, rotated) in &secrets {
-        table.add_row(vec![
-            status_icon("ok"),
-            name.to_string(),
-            kind.to_string(),
-            version.to_string(),
-            rotated.to_string(),
-        ]);
-    }
-
-    println!("{table}");
-
-    eprintln!(
-        "\n  {} secret(s) stored (values are never displayed in list)",
-        style(secrets.len()).bold(),
-    );
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// rotate
-// ---------------------------------------------------------------------------
-
-async fn exec_rotate(args: &RotateArgs, _cli: &Cli) -> Result<()> {
-    eprintln!(
-        "{} Rotating secret {}",
-        style("[vault]").cyan().bold(),
-        style(&args.name).bold(),
-    );
-
-    let new_value = match &args.value {
-        Some(v) => v.clone(),
-        None => {
-            Password::new()
-                .with_prompt(format!("New value for '{}'", args.name))
-                .with_confirmation("Confirm new value", "Values do not match")
-                .interact()?
+        VaultCommand::Get(args) => {
+            let secret = store.get_secret(&args.name).await?;
+            if args.raw {
+                use std::io::Write;
+                std::io::stdout().write_all(&secret.encrypted_value)?;
+            } else {
+                println!("{}: [hidden; use --raw to reveal]", args.name);
+            }
         }
-    };
-
-    // In production: call vault.rotate(&args.name, &new_value) which
-    // re-encrypts with a fresh data key and increments the version.
-    let _ = new_value;
-
-    section("Rotation Details");
-    crate::display::kv("Secret", &args.name);
-    crate::display::kv("Old version", "v2");
-    crate::display::kv("New version", "v3");
-    crate::display::kv("Old key", "retired (zeroized)");
-
-    eprintln!(
-        "\n{} Secret {} rotated to v3",
-        style("\u{2714}").green().bold(),
-        style(&args.name).bold(),
-    );
-
+        VaultCommand::List => {
+            for secret in store.list_secrets().await? {
+                println!("{} v{}", secret.name, secret.version);
+            }
+        }
+        VaultCommand::Rotate(args) => {
+            let value = match &args.value {
+                Some(value) => value.clone(),
+                None => Password::new().with_prompt("New value").interact()?,
+            };
+            store.rotate_secret(&args.name, value.as_bytes()).await?;
+            eprintln!("Rotated {}", args.name);
+        }
+        VaultCommand::Init => unreachable!(),
+    }
+    store.seal();
     Ok(())
 }

@@ -6,7 +6,7 @@
 
 DAF brings task graphs, a binary communication protocol, memory stores and orchestration types into one workspace. You can work with the libraries directly and supply the task handlers and integrations your system needs.
 
-**Status: early development, v0.1.0.** The libraries and the CLI are at different stages. Several CLI commands still demonstrate intended behavior instead of invoking the underlying subsystem. Start with the libraries; see [implementation status](#implementation-status) before using the CLI for operational work.
+**Status: early development, v0.1.0.** The libraries and the CLI are at different stages. The CLI executes local command missions and stores encrypted secrets. Cluster operations require a connected backend and fail explicitly when unavailable; see [implementation status](#implementation-status) before using the CLI for operational work.
 
 [DDAL protocol](docs/DDAL.md) · [Memory design](docs/MEMORY.md) · [Source](crates/) · [Apache 2.0](LICENSE)
 
@@ -73,19 +73,47 @@ assert_eq!(plan.waves.len(), 3);
 
 This builds a plan. To execute work, implement [`TaskHandler`](crates/daf-graph/src/executor.rs) and use `GraphExecutor`. The graph library can also export DOT and Mermaid representations.
 
+## Local execution
+
+Build `cargo build --locked -p daf`, then run a mission:
+
+```yaml
+mission:
+  name: local-checks
+  tasks:
+    - name: inspect
+      agent: local
+      params:
+        command: ["git", "status", "--short"]
+    - name: verify
+      agent: local
+      depends_on: [inspect]
+      params:
+        command: ["cargo", "test", "--locked", "-p", "daf-graph"]
+```
+
+Save this in the project directory and run `daf run mission.yml --yes --parallelism 4 --timeout 300`.
+Commands use argv directly, without an implicit shell. Paths resolve from the mission directory;
+`params.cwd` selects a different working directory. The entire graph is checked before execution.
+Failed dependencies prevent downstream commands from running. Timeout terminates the direct command;
+commands that spawn detached descendants must manage their own process lifecycle.
+
+`daf vault init`, `set`, `get`, `list`, and `rotate` use encrypted Sled storage in `.daf/vault`.
+The master password is prompted without echo; automation can supply `DAF_VAULT_PASSWORD` and
+`DAF_VAULT_DIR`. Values are hidden unless `get --raw` is requested. Initialization refuses an existing path.
+
 ## Implementation status
 
-The codebase contains implementations of the graph engine, DDAL codec, memory stores and supporting libraries. It is not yet a complete distributed agent platform.
+Local missions and vault operations perform real work. `init`, `configure check` and `provision plan`
+provide local scaffolding or static previews. Cluster agent control, cluster status, conversation logs,
+provisioning apply/destroy and configuration execution return explicit unsupported errors. They do not
+invent agents, resources, logs or successful execution.
 
-- **CLI integration:** agent operations, mission execution, provisioning and configuration still contain demonstration paths. [`daf status`](crates/daf-cli/src/commands/status.rs) is not a live cluster inventory.
-- **Vault CLI:** [`vault get`](crates/daf-cli/src/commands/vault.rs) returns a placeholder; it is not wired to the encrypted store. The vault library is separate from this command.
-- **Distributed runtime:** node join/leave transport and live configuration reload remain incomplete in [`daf-runtime`](crates/daf-runtime/src/).
-- **Examples:** [`examples/`](examples/) contains code and configuration references. It is not a validated deployment catalogue.
+The runtime libraries still need integration work for a distributed deployment. This release does not
+claim a production-ready cluster controller. Verify locally with:
 
-Read these paths before treating a successful CLI message as evidence that an operation occurred. Performance claims need a reproducible workload; there is no universal latency or speedup guarantee here.
-
-## Explore and contribute
-
-Start with the [graph API](crates/daf-graph/src/lib.rs), [DDAL codec](crates/daf-ddal/src/codec.rs), [memory manager](crates/daf-memory/src/manager.rs), or [Rust SDK](crates/daf-sdk/src/lib.rs). Contributions that connect a command to real execution, add a focused regression test, or improve protocol documentation are useful starting points.
-
-Created and maintained by **[Darshankumar Joshi](https://github.com/darshjme)**. Licensed under [Apache 2.0](LICENSE).
+```sh
+cargo test --locked -p daf --lib
+cargo build --locked -p daf
+python3 scripts/check_local_cli.py
+```

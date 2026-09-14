@@ -1,219 +1,219 @@
-//! `daf run <mission.yml>` — Load and execute a mission file.
-//!
-//! Parses the mission YAML, builds an execution plan, displays a confirmation
-//! prompt, runs the plan with live progress bars, and prints a results summary.
-
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
-
-use anyhow::{bail, Context, Result};
-use console::style;
-use dialoguer::Confirm;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use serde::Deserialize;
-
-use crate::display::{colorize_status, format_duration, format_table, status_icon};
+//! Execute a validated dependency graph of local commands.
 use crate::Cli;
+use anyhow::{Context, Result, bail};
+use dialoguer::Confirm;
+use serde::Deserialize;
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    time::Duration,
+};
 
-/// Arguments for `daf run`.
 #[derive(Debug, clap::Args)]
 pub struct RunArgs {
-    /// Path to the mission YAML file.
     pub mission: PathBuf,
-
-    /// Skip the confirmation prompt.
     #[arg(short, long)]
     pub yes: bool,
-
-    /// Maximum parallel agent executions.
     #[arg(long, default_value_t = 8)]
     pub parallelism: usize,
-
-    /// Timeout per task in seconds.
     #[arg(long, default_value_t = 300)]
     pub timeout: u64,
 }
-
-/// Top-level mission file structure.
 #[derive(Debug, Deserialize)]
 struct MissionFile {
     mission: MissionSpec,
 }
-
 #[derive(Debug, Deserialize)]
 struct MissionSpec {
     name: String,
     #[serde(default)]
-    description: String,
-    #[serde(default)]
     tasks: Vec<TaskSpec>,
 }
-
 #[derive(Debug, Clone, Deserialize)]
 struct TaskSpec {
     name: String,
     agent: String,
     #[serde(default)]
     depends_on: Vec<String>,
-    #[serde(default)]
-    params: serde_json::Value,
+    params: Params,
+}
+#[derive(Debug, Clone, Deserialize)]
+struct Params {
+    command: Vec<String>,
+    cwd: Option<PathBuf>,
 }
 
-/// Result of a single task execution.
-struct TaskResult {
-    name: String,
-    agent: String,
-    status: String,
-    duration: Duration,
-    message: String,
-}
-
-/// Execute the `run` command.
-pub async fn exec(args: &RunArgs, _cli: &Cli) -> Result<()> {
-    // ---- load mission file ---------------------------------------------
-    let raw = std::fs::read_to_string(&args.mission)
-        .with_context(|| format!("cannot read mission file: {}", args.mission.display()))?;
-
-    let mission_file: MissionFile = serde_json::from_value(
-        serde_yaml_ng::from_str::<serde_json::Value>(&raw)
-            .with_context(|| "invalid YAML in mission file")?,
-    )
-    .with_context(|| "mission file does not match expected schema")?;
-
-    let mission = mission_file.mission;
-
-    if mission.tasks.is_empty() {
-        bail!("mission '{}' has no tasks defined", mission.name);
+fn validate(tasks: &[TaskSpec]) -> Result<()> {
+    if tasks.is_empty() {
+        bail!("Mission has no tasks");
     }
-
-    // ---- display execution plan ----------------------------------------
-    eprintln!(
-        "{} Mission: {}",
-        style("[run]").cyan().bold(),
-        style(&mission.name).bold(),
-    );
-    if !mission.description.is_empty() {
-        eprintln!("  {}", style(&mission.description).dim());
-    }
-    eprintln!();
-
-    let mut plan_table = format_table(&["#", "Task", "Agent", "Dependencies"]);
-    for (i, task) in mission.tasks.iter().enumerate() {
-        let deps = if task.depends_on.is_empty() {
-            "-".to_string()
-        } else {
-            task.depends_on.join(", ")
-        };
-        plan_table.add_row(vec![
-            &(i + 1).to_string(),
-            &task.name,
-            &task.agent,
-            &deps,
-        ]);
-    }
-    eprintln!("{plan_table}\n");
-
-    // ---- confirmation --------------------------------------------------
-    if !args.yes {
-        let proceed = Confirm::new()
-            .with_prompt(format!(
-                "Execute {} tasks with parallelism={}?",
-                mission.tasks.len(),
-                args.parallelism,
-            ))
-            .default(true)
-            .interact()?;
-
-        if !proceed {
-            eprintln!("{}", style("Aborted.").yellow());
-            return Ok(());
+    let mut names = HashSet::new();
+    for task in tasks {
+        if task.name.is_empty() || !names.insert(task.name.clone()) {
+            bail!("Task names must be unique and nonempty");
+        }
+        if task.agent != "local" {
+            bail!(
+                "Agent '{}' has no connected dispatcher; use agent: local with params.command argv",
+                task.agent
+            );
+        }
+        if task.params.command.is_empty() || task.params.command[0].is_empty() {
+            bail!("Task '{}' needs a nonempty command argv", task.name);
         }
     }
-
-    // ---- execute with progress bars ------------------------------------
-    let multi = MultiProgress::new();
-    let sty = ProgressStyle::with_template(
-        "  {spinner:.cyan} {prefix:.bold} {wide_msg} [{elapsed_precise}]",
-    )?
-    .tick_strings(&["\u{25CB}", "\u{25D4}", "\u{25D1}", "\u{25D5}", "\u{25CF}"]);
-
-    let start = Instant::now();
-    let mut results: Vec<TaskResult> = Vec::with_capacity(mission.tasks.len());
-
-    // Execute tasks sequentially for now (respecting depends_on ordering).
-    // A full DAG scheduler lives in daf-orchestrator; here we provide
-    // the CLI UX wrapper.
-    for task in &mission.tasks {
-        let pb = multi.add(ProgressBar::new_spinner());
-        pb.set_style(sty.clone());
-        pb.set_prefix(task.name.clone());
-        pb.set_message(format!("running on {}", style(&task.agent).cyan()));
-        pb.enable_steady_tick(Duration::from_millis(120));
-
-        let task_start = Instant::now();
-
-        // Simulate task execution — in production this dispatches to
-        // daf-orchestrator which routes to the target agent.
-        tokio::time::sleep(Duration::from_millis(150)).await;
-
-        let elapsed = task_start.elapsed();
-
-        pb.finish_with_message(format!(
-            "{} {} ({})",
-            status_icon("ok"),
-            style("done").green(),
-            format_duration(elapsed),
-        ));
-
-        results.push(TaskResult {
-            name: task.name.clone(),
-            agent: task.agent.clone(),
-            status: "ok".into(),
-            duration: elapsed,
-            message: "completed successfully".into(),
-        });
+    let mut visited = HashSet::new();
+    loop {
+        let count = visited.len();
+        for task in tasks {
+            if task.depends_on.iter().all(|d| visited.contains(d)) {
+                visited.insert(task.name.clone());
+            }
+        }
+        if visited.len() == tasks.len() {
+            return Ok(());
+        }
+        if visited.len() == count {
+            bail!("Mission has a dependency cycle or unknown dependency");
+        }
     }
+}
 
-    let total_duration = start.elapsed();
+async fn execute(task: TaskSpec, timeout: u64, root: PathBuf) -> (String, bool) {
+    let mut command = tokio::process::Command::new(&task.params.command[0]);
+    command
+        .args(&task.params.command[1..])
+        .current_dir(
+            task.params
+                .cwd
+                .as_ref()
+                .map(|p| root.join(p))
+                .unwrap_or(root),
+        )
+        .kill_on_drop(true);
+    eprintln!("[running] {}", task.name);
+    let ok = match tokio::time::timeout(Duration::from_secs(timeout), command.status()).await {
+        Ok(Ok(status)) => status.success(),
+        Ok(Err(error)) => {
+            eprintln!("{}: {error}", task.name);
+            false
+        }
+        Err(_) => {
+            eprintln!("{}: timed out after {timeout}s", task.name);
+            false
+        }
+    };
+    eprintln!("[{}] {}", if ok { "passed" } else { "failed" }, task.name);
+    (task.name, ok)
+}
 
-    // ---- results summary -----------------------------------------------
-    eprintln!();
-    let mut summary = format_table(&["", "Task", "Agent", "Status", "Duration", "Message"]);
-    for r in &results {
-        summary.add_row(vec![
-            &status_icon(&r.status),
-            &r.name,
-            &r.agent,
-            &colorize_status(&r.status),
-            &format_duration(r.duration),
-            &r.message,
-        ]);
+pub async fn exec(args: &RunArgs, _cli: &Cli) -> Result<()> {
+    if args.parallelism == 0 || args.parallelism > 64 || args.timeout == 0 {
+        bail!("parallelism must be 1..64 and timeout must be positive");
     }
-    eprintln!("{summary}");
-
-    let ok_count = results.iter().filter(|r| r.status == "ok").count();
-    let fail_count = results.len() - ok_count;
-
+    let path = args
+        .mission
+        .canonicalize()
+        .context("Cannot locate mission file")?;
+    let raw = std::fs::read_to_string(&path)?;
+    let mission = serde_yaml_ng::from_str::<MissionFile>(&raw)
+        .context("Invalid mission YAML")?
+        .mission;
+    validate(&mission.tasks)?;
     eprintln!(
-        "\n{} Mission {} completed in {} — {} ok, {} failed",
-        if fail_count == 0 {
-            style("\u{2714}").green().bold()
-        } else {
-            style("\u{2718}").red().bold()
-        },
-        style(&mission.name).bold(),
-        style(format_duration(total_duration)).cyan(),
-        style(ok_count).green(),
-        if fail_count > 0 {
-            style(fail_count).red()
-        } else {
-            style(fail_count).dim()
-        },
+        "Mission: {} ({} local commands)",
+        mission.name,
+        mission.tasks.len()
     );
-
-    if fail_count > 0 {
-        bail!("{fail_count} task(s) failed");
+    for task in &mission.tasks {
+        eprintln!(
+            "  {}: {:?} after {:?}",
+            task.name, task.params.command, task.depends_on
+        );
     }
-
+    if !args.yes
+        && !Confirm::new()
+            .with_prompt("Execute these commands?")
+            .default(false)
+            .interact()?
+    {
+        bail!("Mission cancelled");
+    }
+    let root = path
+        .parent()
+        .context("Mission has no directory")?
+        .to_path_buf();
+    let mut pending = mission.tasks;
+    let mut results: HashMap<String, bool> = HashMap::new();
+    let mut active = tokio::task::JoinSet::new();
+    while !pending.is_empty() || !active.is_empty() {
+        let mut index = 0;
+        while index < pending.len() {
+            if pending[index]
+                .depends_on
+                .iter()
+                .any(|d| results.get(d) == Some(&false))
+            {
+                let task = pending.remove(index);
+                eprintln!("[skipped] {}: dependency failed", task.name);
+                results.insert(task.name, false);
+            } else if active.len() < args.parallelism
+                && pending[index]
+                    .depends_on
+                    .iter()
+                    .all(|d| results.get(d) == Some(&true))
+            {
+                let task = pending.remove(index);
+                active.spawn(execute(task, args.timeout, root.clone()));
+            } else {
+                index += 1;
+            }
+        }
+        if let Some(result) = active.join_next().await {
+            let (name, ok) = result?;
+            results.insert(name, ok);
+        }
+    }
+    let failed = results.values().filter(|ok| !**ok).count();
+    eprintln!(
+        "{} passed, {} failed or skipped",
+        results.len() - failed,
+        failed
+    );
+    if failed > 0 {
+        bail!("Mission failed");
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn task(name: &str, deps: &[&str]) -> TaskSpec {
+        TaskSpec {
+            name: name.into(),
+            agent: "local".into(),
+            depends_on: deps.iter().map(|s| s.to_string()).collect(),
+            params: Params {
+                command: vec!["true".into()],
+                cwd: None,
+            },
+        }
+    }
+    #[test]
+    fn validates_out_of_order_graph() {
+        assert!(validate(&[task("b", &["a"]), task("a", &[])]).is_ok());
+    }
+    #[test]
+    fn rejects_invalid_graphs_before_execution() {
+        assert!(validate(&[task("a", &["b"]), task("b", &["a"])]).is_err());
+        assert!(validate(&[task("a", &["missing"])]).is_err());
+        assert!(validate(&[task("a", &[]), task("a", &[])]).is_err());
+    }
+    #[test]
+    fn rejects_unconnected_agents() {
+        let mut t = task("a", &[]);
+        t.agent = "remote".into();
+        assert!(validate(&[t]).is_err());
+    }
 }
