@@ -216,7 +216,7 @@ impl Message {
         if let Some(ttl) = self.ttl {
             let age = Utc::now() - self.timestamp;
             if let Ok(age_std) = age.to_std() {
-                return age_std > ttl;
+                return age_std >= ttl;
             }
         }
         false

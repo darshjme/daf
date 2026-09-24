@@ -242,12 +242,9 @@ impl EpisodeRecorder {
         if entry.tags.iter().any(|t| t == "episode:start") {
             self.end_current_episode("New episode:start marker");
             self.start_episode_from_entry(entry);
-            self.last_entry_time = Some(entry.timestamp);
-            return;
-        }
-
-        // Check for idle gap.
-        if let Some(last_time) = self.last_entry_time {
+            // Fall through so the start marker itself is retained as an event.
+        } else if let Some(last_time) = self.last_entry_time {
+            // Check for idle gap only when no explicit start was supplied.
             let gap = (entry.timestamp - last_time).num_seconds();
             if gap >= self.idle_threshold_secs {
                 self.end_current_episode(&format!("Idle gap of {gap}s exceeded threshold"));
