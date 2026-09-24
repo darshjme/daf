@@ -10,11 +10,13 @@ use crate::node::{NodeId, NodeState};
 use crate::scheduler::WaveScheduler;
 
 use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
@@ -23,27 +25,21 @@ use tracing::{debug, error, info, instrument, warn};
 // ---------------------------------------------------------------------------
 
 /// Boxed async callback for node lifecycle events.
-pub type NodeCallback = Box<
-    dyn Fn(NodeId) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
->;
+pub type NodeCallback =
+    Box<dyn Fn(NodeId) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// Boxed async callback for node failure events (includes error message).
-pub type NodeFailCallback = Box<
-    dyn Fn(NodeId, String) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
->;
+pub type NodeFailCallback =
+    Box<dyn Fn(NodeId, String) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// Boxed async callback for wave completion events.
-pub type WaveCallback = Box<
-    dyn Fn(usize) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
->;
+pub type WaveCallback =
+    Box<dyn Fn(usize) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// Task handler: given a node ID, execute the node's work.
 /// Returns `Ok(())` on success or `Err(message)` on failure.
-pub type TaskHandler = Arc<
-    dyn Fn(NodeId) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
-        + Send
-        + Sync,
->;
+pub type TaskHandler =
+    Arc<dyn Fn(NodeId) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // Progress
@@ -139,7 +135,8 @@ impl GraphExecutor {
         self
     }
 
-    /// Set per-node timeout.
+    /// Set the per-attempt timeout. If a task also declares a timeout, the
+    /// shorter limit applies. Retried handlers must tolerate repeated execution.
     pub fn with_node_timeout(mut self, timeout: Duration) -> Self {
         self.node_timeout = Some(timeout);
         self
@@ -227,6 +224,30 @@ impl GraphExecutor {
     /// if the execution failed fatally (timeout, cancellation, etc.).
     #[instrument(skip(self), fields(graph_name))]
     pub async fn execute(&self) -> Result<ExecutionProgress, GraphError> {
+        // Own spawned tasks outside the timed future: dropping a JoinHandle
+        // detaches it, whereas timeout must stop and join every active worker.
+        let mut tasks = JoinSet::new();
+        let result = if let Some(limit) = self.global_timeout {
+            match tokio::time::timeout(limit, self.execute_inner(&mut tasks)).await {
+                Ok(result) => result,
+                Err(_) => Err(GraphError::GlobalTimeout(limit)),
+            }
+        } else {
+            self.execute_inner(&mut tasks).await
+        };
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+        if result.is_err() {
+            // Aborted handlers can no longer race with these state updates.
+            self.cancel_remaining_nodes();
+        }
+        result
+    }
+
+    async fn execute_inner(
+        &self,
+        tasks: &mut JoinSet<(NodeId, Result<(), String>, Duration)>,
+    ) -> Result<ExecutionProgress, GraphError> {
         let start = Instant::now();
         let graph_name = self.graph.read().name.clone();
         info!(graph = %graph_name, "starting graph execution");
@@ -277,7 +298,11 @@ impl GraphExecutor {
                 }
             }
 
-            debug!(wave = wave.wave_number, nodes = wave.nodes.len(), "executing wave");
+            debug!(
+                wave = wave.wave_number,
+                nodes = wave.nodes.len(),
+                "executing wave"
+            );
 
             // Mark all wave nodes as Running.
             {
@@ -307,12 +332,22 @@ impl GraphExecutor {
             };
 
             // Spawn tasks for all runnable nodes in this wave.
-            let mut handles = Vec::with_capacity(runnable.len());
+            let mut task_nodes = HashMap::with_capacity(runnable.len());
             for node_id in runnable {
                 let graph = Arc::clone(&self.graph);
                 let handler = Arc::clone(&self.task_handler);
                 let cancel = self.cancel_token.clone();
-                let node_timeout = self.node_timeout;
+                let (max_retries, task_timeout) = {
+                    let g = graph.read();
+                    g.get_node(node_id)
+                        .and_then(|node| node.task_spec.as_ref())
+                        .map(|spec| (spec.max_retries, spec.timeout))
+                        .unwrap_or((0, None))
+                };
+                let node_timeout = match (self.node_timeout, task_timeout) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                };
                 let semaphore = concurrency_semaphore.clone();
 
                 // Fire on_node_start callback.
@@ -328,7 +363,7 @@ impl GraphExecutor {
                     }
                 }
 
-                let handle = tokio::spawn(async move {
+                let handle = tasks.spawn(async move {
                     // Acquire semaphore permit if concurrency-limited.
                     let _permit = if let Some(ref sem) = semaphore {
                         Some(sem.acquire().await.expect("semaphore closed"))
@@ -338,23 +373,34 @@ impl GraphExecutor {
 
                     let node_start = Instant::now();
 
-                    // Execute with optional timeout and cancellation.
-                    let result = tokio::select! {
-                        _ = cancel.cancelled() => {
-                            Err("cancelled".to_string())
-                        }
-                        result = async {
-                            if let Some(timeout) = node_timeout {
-                                match tokio::time::timeout(timeout, handler(node_id)).await {
-                                    Ok(r) => r,
-                                    Err(_) => Err(format!("timed out after {timeout:?}")),
-                                }
-                            } else {
-                                handler(node_id).await
+                    // Keep the node Running until the final attempt, so a
+                    // transient failure cannot cascade to dependent nodes.
+                    let mut retries_remaining = max_retries;
+                    let mut cancelled = false;
+                    let result = loop {
+                        let attempt = tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => {
+                                cancelled = true;
+                                Err("cancelled".to_string())
                             }
-                        } => {
-                            result
+                            result = async {
+                                if let Some(timeout) = node_timeout {
+                                    match tokio::time::timeout(timeout, handler(node_id)).await {
+                                        Ok(r) => r,
+                                        Err(_) => Err(format!("timed out after {timeout:?}")),
+                                    }
+                                } else {
+                                    handler(node_id).await
+                                }
+                            } => result,
+                        };
+                        if attempt.is_ok() || cancelled || retries_remaining == 0 {
+                            break attempt;
                         }
+                        retries_remaining -= 1;
+                        // Cooperate even when a handler fails synchronously.
+                        tokio::task::yield_now().await;
                     };
 
                     let elapsed = node_start.elapsed();
@@ -365,9 +411,10 @@ impl GraphExecutor {
                         Ok(()) => {
                             let _ = g.mark_complete(node_id, NodeState::Succeeded, Some(elapsed));
                         }
-                        Err(msg) => {
-                            if msg == "cancelled" {
-                                let _ = g.mark_complete(node_id, NodeState::Cancelled, Some(elapsed));
+                        Err(_) => {
+                            if cancelled {
+                                let _ =
+                                    g.mark_complete(node_id, NodeState::Cancelled, Some(elapsed));
                             } else {
                                 let _ = g.mark_complete(node_id, NodeState::Failed, Some(elapsed));
                             }
@@ -377,26 +424,37 @@ impl GraphExecutor {
                     (node_id, result, elapsed)
                 });
 
-                handles.push(handle);
+                task_nodes.insert(handle.id(), node_id);
             }
 
             // Wait for all tasks in this wave to complete.
-            for handle in handles {
-                match handle.await {
-                    Ok((node_id, result, _elapsed)) => match result {
-                        Ok(()) => {
-                            if let Some(ref cb) = self.on_node_complete {
-                                cb(node_id).await;
+            while let Some(joined) = tasks.join_next_with_id().await {
+                match joined {
+                    Ok((task_id, (node_id, result, _elapsed))) => {
+                        task_nodes.remove(&task_id);
+                        match result {
+                            Ok(()) => {
+                                if let Some(ref cb) = self.on_node_complete {
+                                    cb(node_id).await;
+                                }
+                            }
+                            Err(msg) => {
+                                if let Some(ref cb) = self.on_node_fail {
+                                    cb(node_id, msg).await;
+                                }
                             }
                         }
-                        Err(msg) => {
-                            if let Some(ref cb) = self.on_node_fail {
-                                cb(node_id, msg).await;
-                            }
-                        }
-                    },
+                    }
                     Err(e) => {
                         error!("task panicked: {e}");
+                        if let Some(node_id) = task_nodes.remove(&e.id()) {
+                            self.graph
+                                .write()
+                                .mark_complete(node_id, NodeState::Failed, None)?;
+                            if let Some(ref cb) = self.on_node_fail {
+                                cb(node_id, format!("task join failed: {e}")).await;
+                            }
+                        }
                     }
                 }
             }
@@ -421,7 +479,7 @@ impl GraphExecutor {
         let mut graph = self.graph.write();
         let ids: Vec<NodeId> = graph
             .nodes()
-            .filter(|n| !n.state.is_terminal() && n.state != NodeState::Running)
+            .filter(|n| !n.state.is_terminal())
             .map(|n| n.id)
             .collect();
         for id in ids {
@@ -464,6 +522,257 @@ mod tests {
 
     fn make_task(name: &str) -> Node {
         Node::new(NodeKind::Task, name)
+    }
+
+    fn retry_task(name: &str, retries: u32, timeout: Option<Duration>) -> Node {
+        make_task(name).with_task_spec(crate::node::TaskSpec {
+            task_type: "test".into(),
+            params: serde_json::Value::Null,
+            timeout,
+            max_retries: retries,
+        })
+    }
+
+    #[tokio::test]
+    async fn global_deadline_drops_and_joins_active_wave() {
+        let mut graph = ExecutionGraph::new("deadline-wave");
+        for name in ["a", "b", "c"] {
+            graph.add_node(make_task(name));
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        struct Guard(Arc<AtomicUsize>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let entered = calls.clone();
+        let finished = drops.clone();
+        let handler: TaskHandler = Arc::new(move |_| {
+            let entered = entered.clone();
+            let finished = finished.clone();
+            Box::pin(async move {
+                entered.fetch_add(1, Ordering::SeqCst);
+                let _guard = Guard(finished);
+                std::future::pending::<()>().await;
+                Ok(())
+            })
+        });
+        let executor = GraphExecutor::new(graph, handler)
+            .with_max_concurrency(2)
+            .with_global_timeout(Duration::from_millis(20));
+        let result = tokio::time::timeout(Duration::from_secs(2), executor.execute())
+            .await
+            .unwrap();
+        assert!(matches!(result, Err(GraphError::GlobalTimeout(_))));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            2,
+            "must join cleanup before returning"
+        );
+        assert!(executor
+            .graph()
+            .read()
+            .nodes()
+            .all(|n| n.state == NodeState::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn global_deadline_bounds_retry_loop() {
+        let mut graph = ExecutionGraph::new("deadline-retry");
+        graph.add_node(retry_task("a", u32::MAX, None));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let handler: TaskHandler = Arc::new(move |_| {
+            let calls = observed.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err("retryable failure".into())
+            })
+        });
+        let executor =
+            GraphExecutor::new(graph, handler).with_global_timeout(Duration::from_millis(20));
+        let result = tokio::time::timeout(Duration::from_secs(2), executor.execute())
+            .await
+            .unwrap();
+        assert!(matches!(result, Err(GraphError::GlobalTimeout(_))));
+        let count = calls.load(Ordering::SeqCst);
+        assert!(count > 1);
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), count, "no detached retries");
+        assert_eq!(executor.progress().nodes_running, 0);
+    }
+
+    #[tokio::test]
+    async fn panic_skips_dependents_and_preserves_independent_work() {
+        let mut graph = ExecutionGraph::new("panic-containment");
+        let a = graph.add_node(make_task("a"));
+        let b = graph.add_node(make_task("b"));
+        let c = graph.add_node(make_task("c"));
+        graph
+            .add_edge(Edge::new(a, b, EdgeKind::DependsOn))
+            .unwrap();
+        let independent = Arc::new(AtomicUsize::new(0));
+        let observed = independent.clone();
+        let handler: TaskHandler = Arc::new(move |id| {
+            let observed = observed.clone();
+            Box::pin(async move {
+                assert_ne!(id, b, "dependent must never execute");
+                if id == a {
+                    panic!("controlled handler panic");
+                }
+                assert_eq!(id, c);
+                observed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+        let failures = Arc::new(AtomicUsize::new(0));
+        let reported = failures.clone();
+        let executor = GraphExecutor::new(graph, handler).on_node_fail(Box::new(move |id, _| {
+            assert_eq!(id, a);
+            reported.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {})
+        }));
+        let p = executor.execute().await.unwrap();
+        assert_eq!(
+            (p.nodes_failed, p.nodes_skipped, p.nodes_running),
+            (1, 1, 0)
+        );
+        assert_eq!(independent.load(Ordering::SeqCst), 1);
+        assert_eq!(failures.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn transient_failure_retries_before_releasing_dependent() {
+        let mut graph = ExecutionGraph::new("retry-success");
+        let a = graph.add_node(retry_task("a", 1, None));
+        let b = graph.add_node(make_task("b"));
+        graph
+            .add_edge(Edge::new(a, b, EdgeKind::DependsOn))
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let handler: TaskHandler = Arc::new(move |id| {
+            let calls = observed.clone();
+            Box::pin(async move {
+                if id == a {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        return Err("transient".into());
+                    }
+                } else {
+                    assert_eq!(calls.load(Ordering::SeqCst), 2);
+                }
+                Ok(())
+            })
+        });
+        let executor = GraphExecutor::new(graph, handler);
+        let p = executor.execute().await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            (p.nodes_completed, p.nodes_failed, p.nodes_skipped),
+            (2, 0, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_retries_skip_dependent_and_preserve_independent_work() {
+        let mut graph = ExecutionGraph::new("retry-exhausted");
+        let a = graph.add_node(retry_task("a", 2, None));
+        let b = graph.add_node(make_task("b"));
+        let c = graph.add_node(make_task("c"));
+        graph
+            .add_edge(Edge::new(a, b, EdgeKind::DependsOn))
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let handler: TaskHandler = Arc::new(move |id| {
+            let calls = observed.clone();
+            Box::pin(async move {
+                assert_ne!(id, b, "failed dependency must prevent invocation");
+                if id == a {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err("persistent".into())
+                } else {
+                    Ok(())
+                }
+            })
+        });
+        let executor = GraphExecutor::new(graph, handler);
+        let p = executor.execute().await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!((p.nodes_failed, p.nodes_skipped), (1, 1));
+        assert_eq!(
+            executor.graph().read().get_node(c).unwrap().state,
+            NodeState::Succeeded
+        );
+    }
+
+    #[tokio::test]
+    async fn task_timeout_retries_and_drops_each_attempt() {
+        let mut graph = ExecutionGraph::new("retry-timeout");
+        let a = graph.add_node(retry_task("a", 1, Some(Duration::from_millis(1))));
+        let b = graph.add_node(make_task("b"));
+        graph
+            .add_edge(Edge::new(a, b, EdgeKind::DependsOn))
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        struct DropCounter(Arc<AtomicUsize>);
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let observed = calls.clone();
+        let dropped = drops.clone();
+        let handler: TaskHandler = Arc::new(move |id| {
+            let calls = observed.clone();
+            let drops = dropped.clone();
+            Box::pin(async move {
+                assert_eq!(id, a);
+                calls.fetch_add(1, Ordering::SeqCst);
+                let _guard = DropCounter(drops);
+                std::future::pending::<()>().await;
+                Ok(())
+            })
+        });
+        let executor = GraphExecutor::new(graph, handler).with_node_timeout(Duration::from_secs(5));
+        let p = tokio::time::timeout(Duration::from_secs(1), executor.execute())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+        assert_eq!((p.nodes_failed, p.nodes_skipped), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn cancellation_does_not_retry() {
+        let mut graph = ExecutionGraph::new("retry-cancel");
+        let a = graph.add_node(retry_task("a", 10, None));
+        let token = CancellationToken::new();
+        let cancel = token.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let handler: TaskHandler = Arc::new(move |_| {
+            let cancel = cancel.clone();
+            let calls = observed.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                cancel.cancel();
+                std::future::pending::<()>().await;
+                Ok(())
+            })
+        });
+        let executor = GraphExecutor::new(graph, handler).with_cancel_token(token);
+        executor.execute().await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            executor.graph().read().get_node(a).unwrap().state,
+            NodeState::Cancelled
+        );
     }
 
     #[tokio::test]
@@ -541,8 +850,7 @@ mod tests {
         });
 
         let token = CancellationToken::new();
-        let executor = GraphExecutor::new(g, handler)
-            .with_cancel_token(token.clone());
+        let executor = GraphExecutor::new(g, handler).with_cancel_token(token.clone());
 
         // Cancel after a short delay.
         let cancel_token = token.clone();
@@ -572,8 +880,7 @@ mod tests {
             })
         });
 
-        let executor = GraphExecutor::new(g, handler)
-            .with_node_timeout(Duration::from_millis(50));
+        let executor = GraphExecutor::new(g, handler).with_node_timeout(Duration::from_millis(50));
 
         let progress = executor.execute().await.unwrap();
         assert_eq!(progress.nodes_failed, 1);

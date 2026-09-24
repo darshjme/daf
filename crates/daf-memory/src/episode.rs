@@ -542,7 +542,7 @@ mod tests {
         ep2.agent_ids.push(agent2);
         ep2.tags.push("debug".into());
         ep2.importance = 0.3;
-        ep2.complete_failure("timeout".into());
+        ep2.complete_failure("timeout");
         idx.insert(ep2);
 
         assert_eq!(idx.len(), 2);

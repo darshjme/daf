@@ -13,9 +13,9 @@ use std::time::Duration;
 use chrono::Utc;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
-use daf_core::agent::{AgentCapability, AgentId, AgentManifest, AgentStatus};
+use daf_core::agent::{AgentId, AgentManifest, AgentStatus};
 use daf_core::error::{DafError, DafResult};
 use daf_graph::node::TaskSpec;
 
@@ -24,6 +24,42 @@ use crate::metrics::MetricsCollector;
 use crate::mission::{Mission, MissionId, MissionResult, MissionState, PhaseResult};
 use crate::specialist::SpecialistRouter;
 use crate::supervisor::{Supervisor, SupervisorEvent, SupervisorStrategy};
+
+/// In-process execution boundary. Implementations must be cancellation-safe:
+/// timeout or caller cancellation drops the execution future. This does not
+/// imply remote execution, transport delivery, or a model adapter.
+#[async_trait::async_trait]
+pub trait WorkerHandler: Send + Sync {
+    async fn execute(&self, agent: AgentId, task: TaskSpec) -> DafResult<()>;
+}
+
+struct TaskLease<'a> {
+    orchestrator: &'a Orchestrator,
+    agent: AgentId,
+    succeeded: bool,
+}
+impl Drop for TaskLease<'_> {
+    fn drop(&mut self) {
+        self.orchestrator
+            .record_task_done(&self.agent, self.succeeded);
+    }
+}
+
+struct MissionLease<'a> {
+    orchestrator: &'a Orchestrator,
+    id: MissionId,
+    finished: bool,
+}
+impl Drop for MissionLease<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.orchestrator
+                .missions
+                .insert(self.id, MissionState::Cancelled);
+            self.orchestrator.metrics.mission_completed();
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // OrchestratorConfig
@@ -100,6 +136,7 @@ pub struct AgentEntry {
 pub struct Orchestrator {
     /// Runtime configuration.
     config: OrchestratorConfig,
+    workers: DashMap<AgentId, Arc<dyn WorkerHandler>>,
     /// Registered agents keyed by their ID.
     agents: DashMap<AgentId, AgentEntry>,
     /// Active missions keyed by their ID.
@@ -127,6 +164,7 @@ impl Orchestrator {
     pub fn with_config(config: OrchestratorConfig) -> Self {
         Self {
             config,
+            workers: DashMap::new(),
             agents: DashMap::new(),
             missions: DashMap::new(),
             router: SpecialistRouter::new(),
@@ -170,6 +208,18 @@ impl Orchestrator {
         Ok(id)
     }
 
+    /// Attach an actual executor to a registered agent.
+    pub fn register_worker(&self, id: AgentId, worker: Arc<dyn WorkerHandler>) -> DafResult<()> {
+        if !self.agents.contains_key(&id) {
+            return Err(DafError::NotFound {
+                entity: "agent".into(),
+                id: id.to_string(),
+            });
+        }
+        self.workers.insert(id, worker);
+        Ok(())
+    }
+
     /// Remove an agent from the registry.
     ///
     /// Any tasks currently assigned to the agent are NOT automatically
@@ -181,6 +231,7 @@ impl Orchestrator {
                 entity: "agent".into(),
                 id: agent_id.to_string(),
             })?;
+        self.workers.remove(agent_id);
         self.router.deregister_agent(agent_id);
         self.supervisor.lock().remove_agent(agent_id);
         self.metrics.agent_removed();
@@ -210,8 +261,20 @@ impl Orchestrator {
 
         // Update the agent's active task count.
         if let Some(mut entry) = self.agents.get_mut(&decision.agent_id) {
+            if entry.active_tasks >= self.config.max_tasks_per_agent {
+                self.router.record_task_completion(&decision.agent_id);
+                return Err(DafError::ResourceExhausted {
+                    resource: "agent task slots".into(),
+                });
+            }
             entry.active_tasks += 1;
             entry.status = AgentStatus::Executing;
+        } else {
+            self.router.record_task_completion(&decision.agent_id);
+            return Err(DafError::NotFound {
+                entity: "agent".into(),
+                id: decision.agent_id.to_string(),
+            });
         }
 
         self.metrics.task_dispatched();
@@ -245,154 +308,198 @@ impl Orchestrator {
 
     // -- Mission execution ----------------------------------------------------
 
-    /// Execute a mission end-to-end using wave-based scheduling.
-    ///
-    /// Phases are topologically sorted into waves. Within each wave, all
-    /// phases execute concurrently (tasks within a phase are dispatched up
-    /// to the phase's concurrency limit). The orchestrator blocks between
-    /// waves, waiting for all tasks in the current wave to finish before
-    /// advancing.
-    ///
-    /// Returns a [`MissionResult`] summarizing the outcome.
-    #[instrument(skip(self, mission), fields(mission_id = %mission.id, mission_name = %mission.name))]
+    /// Execute a mission from synchronous code. Inside Tokio, use
+    /// [`Self::run_mission_async`] instead of blocking the runtime.
     pub fn run_mission(&self, mission: &Mission) -> DafResult<MissionResult> {
-        let started_at = Utc::now();
-        info!(id = %mission.id, name = %mission.name, "starting mission");
-        self.missions.insert(mission.id, MissionState::Planning);
-        self.metrics.mission_started();
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(DafError::ConfigError(
+                "use run_mission_async inside a Tokio runtime".into(),
+            ));
+        }
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| DafError::Internal(e.to_string()))?
+            .block_on(self.run_mission_async(mission))
+    }
 
-        // Resolve phase execution waves via topological sort.
+    /// Execute registered handlers and await their results. Waves respect
+    /// dependencies; phases and tasks currently execute sequentially. Mission,
+    /// wave, phase and task deadlines bound execution and retry backoff.
+    /// RetryPolicy controls retries; TaskSpec.max_retries is not used here.
+    #[instrument(skip(self, mission), fields(mission_id = %mission.id))]
+    pub async fn run_mission_async(&self, mission: &Mission) -> DafResult<MissionResult> {
+        // Validate before inserting state, so invalid graphs cannot leak Planning.
         let waves = mission.resolve_execution_order()?;
+        let started_at = Utc::now();
+        let start = tokio::time::Instant::now();
+        let mission_deadline = mission.timeout.map(|d| start + d);
         self.missions.insert(mission.id, MissionState::Executing);
-
+        self.metrics.mission_started();
+        let mut mission_lease = MissionLease {
+            orchestrator: self,
+            id: mission.id,
+            finished: false,
+        };
         let mut phase_results = Vec::new();
         let mut failed = false;
-
-        for (wave_idx, wave_phases) in waves.iter().enumerate() {
-            if self.is_shutting_down() {
-                warn!(mission = %mission.id, "shutdown requested, cancelling mission");
-                self.missions.insert(mission.id, MissionState::Cancelled);
-                failed = true;
-                break;
-            }
-
-            debug!(
-                mission = %mission.id,
-                wave = wave_idx,
-                phases = wave_phases.len(),
-                "executing wave"
-            );
-
-            for phase in wave_phases {
-                let phase_start = std::time::Instant::now();
-                let mut tasks_succeeded = 0usize;
-                let mut tasks_failed_count = 0usize;
-                let mut tasks_skipped = 0usize;
+        let mut outcomes = HashMap::new();
+        for wave in waves {
+            let wave_deadline =
+                tokio::time::Instant::now() + Duration::from_secs(self.config.wave_timeout_secs);
+            for phase in wave {
+                let phase_start = tokio::time::Instant::now();
+                let mut deadline = wave_deadline;
+                if let Some(d) = mission_deadline {
+                    deadline = deadline.min(d);
+                }
+                if let Some(d) = phase.timeout {
+                    deadline = deadline.min(phase_start + d);
+                }
+                let mut tasks_succeeded = 0;
+                let mut tasks_failed = 0;
+                let mut tasks_skipped = 0;
+                let mut retries_used = 0;
                 let mut agents_used = Vec::new();
-                let mut retries_used = 0u32;
-                let retry_policy = mission.effective_retry_policy(phase);
-
+                let mut last_error = None;
+                let blocked = phase
+                    .dependencies
+                    .iter()
+                    .any(|name| outcomes.get(name) != Some(&true));
+                let policy = mission.effective_retry_policy(phase);
                 for task in &phase.tasks {
-                    if self.is_shutting_down() || (failed && self.config.fail_fast) {
+                    if self.is_shutting_down() || blocked || (failed && self.config.fail_fast) {
                         tasks_skipped += 1;
                         continue;
                     }
-
-                    // Dispatch with retry logic.
-                    let caps = &phase.required_capabilities;
-                    match self.dispatch_task(task, caps) {
-                        Ok(agent_id) => {
-                            agents_used.push(agent_id);
-                            tasks_succeeded += 1;
+                    let mut success = false;
+                    for attempt in 0..=policy.max_retries {
+                        if tokio::time::Instant::now() >= deadline || self.is_shutting_down() {
+                            last_error = Some("deadline exceeded or shutdown requested".into());
+                            break;
                         }
-                        Err(e) => {
-                            let mut succeeded = false;
-                            for attempt in 0..retry_policy.max_retries {
-                                retries_used += 1;
-                                let _backoff = retry_policy.backoff_for_attempt(attempt);
-                                debug!(
-                                    phase = %phase.name,
-                                    attempt = attempt + 1,
-                                    "retrying task dispatch"
-                                );
-                                if let Ok(agent_id) = self.dispatch_task(task, caps) {
-                                    agents_used.push(agent_id);
-                                    succeeded = true;
-                                    break;
-                                }
+                        if attempt > 0 {
+                            if tokio::time::timeout_at(
+                                deadline,
+                                tokio::time::sleep(policy.backoff_for_attempt(attempt - 1)),
+                            )
+                            .await
+                            .is_err()
+                            {
+                                last_error = Some("deadline exceeded during retry backoff".into());
+                                break;
                             }
-                            if succeeded {
-                                tasks_succeeded += 1;
-                            } else {
-                                error!(
-                                    phase = %phase.name,
-                                    error = %e,
-                                    "task dispatch failed after retries"
-                                );
-                                tasks_failed_count += 1;
+                            // A ready backoff sleep may win timeout polling after a
+                            // stalled runtime has already passed the deadline.
+                            if tokio::time::Instant::now() >= deadline || self.is_shutting_down() {
+                                last_error =
+                                    Some("deadline exceeded or shutdown after backoff".into());
+                                break;
+                            }
+                            retries_used += 1;
+                        }
+                        let result = match self.dispatch_task(task, &phase.required_capabilities) {
+                            Err(e) => Err(e),
+                            Ok(agent) => {
+                                agents_used.push(agent);
+                                let mut lease = TaskLease {
+                                    orchestrator: self,
+                                    agent,
+                                    succeeded: false,
+                                };
+                                // Never retain a DashMap lock across await.
+                                let worker =
+                                    self.workers.get(&agent).map(|w| Arc::clone(w.value()));
+                                let task_deadline = task
+                                    .timeout
+                                    .map(|d| tokio::time::Instant::now() + d)
+                                    .unwrap_or(deadline)
+                                    .min(deadline);
+                                let result = match worker {
+                                    None => Err(DafError::ConfigError(format!(
+                                        "no worker handler registered for {agent}"
+                                    ))),
+                                    Some(_) if tokio::time::Instant::now() >= task_deadline => {
+                                        Err(DafError::TimeoutError {
+                                            operation: task.task_type.clone(),
+                                            duration: task.timeout.unwrap_or(Duration::ZERO),
+                                        })
+                                    }
+                                    Some(worker) => match tokio::time::timeout_at(
+                                        task_deadline,
+                                        worker.execute(agent, task.clone()),
+                                    )
+                                    .await
+                                    {
+                                        Ok(result) => result,
+                                        Err(_) => Err(DafError::TimeoutError {
+                                            operation: task.task_type.clone(),
+                                            duration: task.timeout.unwrap_or_else(|| {
+                                                deadline.saturating_duration_since(phase_start)
+                                            }),
+                                        }),
+                                    },
+                                };
+                                lease.succeeded = result.is_ok();
+                                result
+                            }
+                        };
+                        match result {
+                            Ok(()) => {
+                                success = true;
+                                break;
+                            }
+                            Err(e) => {
+                                last_error = Some(e.to_string());
                             }
                         }
                     }
+                    if success {
+                        tasks_succeeded += 1;
+                    } else {
+                        tasks_failed += 1;
+                    }
                 }
-
-                let phase_succeeded = tasks_failed_count == 0;
-                if !phase_succeeded {
-                    failed = true;
-                }
-
+                let succeeded = tasks_failed == 0 && tasks_skipped == 0 && !blocked;
+                failed |= !succeeded;
+                outcomes.insert(phase.name.clone(), succeeded);
                 phase_results.push(PhaseResult {
                     phase_name: phase.name.clone(),
-                    succeeded: phase_succeeded,
+                    succeeded,
                     tasks_succeeded,
-                    tasks_failed: tasks_failed_count,
+                    tasks_failed,
                     tasks_skipped,
                     duration: phase_start.elapsed(),
-                    error: if phase_succeeded {
+                    error: if succeeded {
                         None
                     } else {
-                        Some(format!(
-                            "{tasks_failed_count} tasks failed in phase '{}'",
-                            phase.name
-                        ))
+                        Some(last_error.unwrap_or_else(|| {
+                            "phase skipped due to failed dependency, fail-fast or shutdown".into()
+                        }))
                     },
                     agents_used,
                     retries_used,
                 });
             }
         }
-
-        let finished_at = Utc::now();
-        let total_duration = (finished_at - started_at)
-            .to_std()
-            .unwrap_or(Duration::ZERO);
-
-        let final_state = if failed {
-            if self.is_shutting_down() {
-                MissionState::Cancelled
-            } else {
-                MissionState::Failed
-            }
+        let state = if self.is_shutting_down() {
+            MissionState::Cancelled
+        } else if failed {
+            MissionState::Failed
         } else {
             MissionState::Completed
         };
-
-        self.missions.insert(mission.id, final_state);
+        self.missions.insert(mission.id, state);
         self.metrics.mission_completed();
-        info!(
-            id = %mission.id,
-            state = %final_state,
-            duration = ?total_duration,
-            "mission finished"
-        );
-
+        mission_lease.finished = true;
         Ok(MissionResult {
             mission_id: mission.id,
-            state: final_state,
+            state,
             phase_results,
-            total_duration,
+            total_duration: start.elapsed(),
             agent_utilization: HashMap::new(),
             started_at,
-            finished_at,
+            finished_at: Utc::now(),
         })
     }
 
@@ -424,9 +531,9 @@ impl Orchestrator {
 
                 match events {
                     Ok(evts) => {
-                        let has_restart = evts.iter().any(|e| {
-                            matches!(e, SupervisorEvent::AgentRestarted { .. })
-                        });
+                        let has_restart = evts
+                            .iter()
+                            .any(|e| matches!(e, SupervisorEvent::AgentRestarted { .. }));
                         if has_restart {
                             info!(agent = %entry.id, "supervisor approved restart");
                             failed_agents.push(entry.id);
@@ -504,13 +611,13 @@ impl Orchestrator {
 
     /// Update an agent's heartbeat timestamp (called by the heartbeat probe).
     pub fn heartbeat(&self, agent_id: &AgentId) -> DafResult<()> {
-        let mut entry =
-            self.agents
-                .get_mut(agent_id)
-                .ok_or_else(|| DafError::NotFound {
-                    entity: "agent".into(),
-                    id: agent_id.to_string(),
-                })?;
+        let mut entry = self
+            .agents
+            .get_mut(agent_id)
+            .ok_or_else(|| DafError::NotFound {
+                entity: "agent".into(),
+                id: agent_id.to_string(),
+            })?;
         entry.last_heartbeat = Utc::now();
         Ok(())
     }
@@ -638,6 +745,171 @@ mod tests {
         }
     }
 
+    struct TestWorker {
+        calls: std::sync::atomic::AtomicUsize,
+        failures: usize,
+        hang: bool,
+    }
+    #[async_trait::async_trait]
+    impl WorkerHandler for TestWorker {
+        async fn execute(&self, _: AgentId, _: TaskSpec) -> DafResult<()> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.hang {
+                std::future::pending::<()>().await;
+            }
+            if call < self.failures {
+                Err(DafError::Internal("controlled failure".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn worker_mission() -> Mission {
+        Mission::builder("worker-test")
+            .retry_policy(crate::mission::RetryPolicy::none())
+            .phase(Phase::new("run").task(sample_task("execute")))
+            .build()
+    }
+
+    #[tokio::test]
+    async fn missing_handler_never_claims_success_and_releases_load() {
+        let orch = Orchestrator::new();
+        let id = orch.spawn_agent(test_manifest("worker", &[])).unwrap();
+        let result = orch.run_mission_async(&worker_mission()).await.unwrap();
+        assert_eq!(result.state, MissionState::Failed);
+        assert_eq!(result.phase_results[0].tasks_failed, 1);
+        assert_eq!(orch.get_agent(&id).unwrap().active_tasks, 0);
+        assert_eq!(orch.router.active_tasks(&id), 0);
+    }
+
+    #[tokio::test]
+    async fn actual_worker_failure_retries_then_succeeds() {
+        let orch = Orchestrator::new();
+        let id = orch.spawn_agent(test_manifest("worker", &[])).unwrap();
+        let worker = Arc::new(TestWorker {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            failures: 1,
+            hang: false,
+        });
+        orch.register_worker(id, worker.clone()).unwrap();
+        let mut mission = worker_mission();
+        mission.retry_policy.max_retries = 1;
+        mission.retry_policy.initial_backoff = Duration::from_millis(10);
+        let started = std::time::Instant::now();
+        let result = orch.run_mission_async(&mission).await.unwrap();
+        assert_eq!(result.state, MissionState::Completed);
+        assert_eq!(worker.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(result.phase_results[0].retries_used, 1);
+        assert!(started.elapsed() >= Duration::from_millis(10));
+        assert_eq!(orch.get_agent(&id).unwrap().active_tasks, 0);
+        assert_eq!(orch.router.active_tasks(&id), 0);
+    }
+
+    #[tokio::test]
+    async fn timeout_and_caller_cancellation_release_task_load() {
+        let orch = Orchestrator::new();
+        let id = orch.spawn_agent(test_manifest("worker", &[])).unwrap();
+        orch.register_worker(
+            id,
+            Arc::new(TestWorker {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                failures: 0,
+                hang: true,
+            }),
+        )
+        .unwrap();
+        let mut mission = worker_mission();
+        mission.phases[0].tasks[0].timeout = Some(Duration::from_millis(5));
+        let result = orch.run_mission_async(&mission).await.unwrap();
+        assert_eq!(result.state, MissionState::Failed);
+        assert_eq!(orch.get_agent(&id).unwrap().active_tasks, 0);
+        mission.phases[0].tasks[0].timeout = None;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), orch.run_mission_async(&mission))
+                .await
+                .is_err()
+        );
+        assert_eq!(orch.get_agent(&id).unwrap().active_tasks, 0);
+        assert_eq!(orch.router.active_tasks(&id), 0);
+        assert_eq!(
+            orch.mission_state(&mission.id),
+            Some(MissionState::Cancelled)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retry_does_not_dispatch_after_runtime_stall_passes_deadline() {
+        struct StallingWorker(std::sync::atomic::AtomicUsize);
+        #[async_trait::async_trait]
+        impl WorkerHandler for StallingWorker {
+            async fn execute(&self, _: AgentId, _: TaskSpec) -> DafResult<()> {
+                if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                    tokio::spawn(async {
+                        std::thread::sleep(Duration::from_millis(30));
+                    });
+                    Err(DafError::Internal("first attempt failed".into()))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let orch = Orchestrator::new();
+        let id = orch.spawn_agent(test_manifest("worker", &[])).unwrap();
+        let worker = Arc::new(StallingWorker(std::sync::atomic::AtomicUsize::new(0)));
+        orch.register_worker(id, worker.clone()).unwrap();
+        let mut mission = worker_mission();
+        mission.phases[0].timeout = Some(Duration::from_millis(10));
+        mission.retry_policy.max_retries = 1;
+        mission.retry_policy.initial_backoff = Duration::from_millis(1);
+        let result = orch.run_mission_async(&mission).await.unwrap();
+        assert_eq!(result.state, MissionState::Failed);
+        assert_eq!(worker.0.load(Ordering::SeqCst), 1);
+        assert_eq!(result.phase_results[0].retries_used, 0);
+        assert_eq!(orch.get_agent(&id).unwrap().active_tasks, 0);
+    }
+
+    #[tokio::test]
+    async fn zero_task_timeout_does_not_poll_worker() {
+        let orch = Orchestrator::new();
+        let id = orch.spawn_agent(test_manifest("worker", &[])).unwrap();
+        let worker = Arc::new(TestWorker {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            failures: 0,
+            hang: false,
+        });
+        orch.register_worker(id, worker.clone()).unwrap();
+        let mut mission = worker_mission();
+        mission.phases[0].tasks[0].timeout = Some(Duration::ZERO);
+        let result = orch.run_mission_async(&mission).await.unwrap();
+        assert_eq!(result.state, MissionState::Failed);
+        assert_eq!(worker.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(orch.get_agent(&id).unwrap().active_tasks, 0);
+    }
+
+    #[tokio::test]
+    async fn failed_dependency_does_not_execute_child_when_fail_fast_disabled() {
+        let orch = Orchestrator::builder().fail_fast(false).build();
+        let id = orch.spawn_agent(test_manifest("worker", &[])).unwrap();
+        let worker = Arc::new(TestWorker {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            failures: 10,
+            hang: false,
+        });
+        orch.register_worker(id, worker.clone()).unwrap();
+        let mut mission = worker_mission();
+        mission.phases.push(
+            Phase::new("child")
+                .depends_on("run")
+                .task(sample_task("child")),
+        );
+        let result = orch.run_mission_async(&mission).await.unwrap();
+        assert_eq!(result.state, MissionState::Failed);
+        assert_eq!(worker.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(result.phase_results[1].tasks_skipped, 1);
+        assert!(!result.phase_results[1].succeeded);
+    }
+
     #[test]
     fn spawn_and_lookup_agent() {
         let orch = Orchestrator::new();
@@ -752,11 +1024,29 @@ mod tests {
     #[test]
     fn run_mission_all_dispatched() {
         let orch = Orchestrator::new();
-        orch.spawn_agent(test_manifest("builder", &["build"])).unwrap();
-        orch.spawn_agent(test_manifest("tester", &["test"])).unwrap();
+        orch.spawn_agent(test_manifest("builder", &["build"]))
+            .unwrap();
+        orch.spawn_agent(test_manifest("tester", &["test"]))
+            .unwrap();
+
+        for id in orch.agent_ids() {
+            orch.register_worker(
+                id,
+                Arc::new(TestWorker {
+                    calls: std::sync::atomic::AtomicUsize::new(0),
+                    failures: 0,
+                    hang: false,
+                }),
+            )
+            .unwrap();
+        }
 
         let mission = Mission::builder("deploy")
-            .phase(Phase::new("build").task(sample_task("cargo.build")).requires("build"))
+            .phase(
+                Phase::new("build")
+                    .task(sample_task("cargo.build"))
+                    .requires("build"),
+            )
             .phase(
                 Phase::new("test")
                     .depends_on("build")
@@ -776,7 +1066,12 @@ mod tests {
     fn run_mission_fails_when_no_agents() {
         let orch = Orchestrator::new();
         let mission = Mission::builder("no-agents")
-            .phase(Phase::new("build").task(sample_task("compile")).requires("build"))
+            .retry_policy(crate::mission::RetryPolicy::none())
+            .phase(
+                Phase::new("build")
+                    .task(sample_task("compile"))
+                    .requires("build"),
+            )
             .build();
 
         let result = orch.run_mission(&mission).unwrap();
@@ -785,9 +1080,7 @@ mod tests {
 
     #[test]
     fn monitor_agents_detects_stale() {
-        let orch = Orchestrator::builder()
-            .heartbeat_interval_secs(0)
-            .build();
+        let orch = Orchestrator::builder().heartbeat_interval_secs(0).build();
 
         let manifest = test_manifest("stale", &[]);
         let id = orch.spawn_agent(manifest).unwrap();
@@ -813,8 +1106,11 @@ mod tests {
     #[test]
     fn builder_with_supervisor_strategy() {
         let orch = Orchestrator::builder()
-            .supervisor_strategy(SupervisorStrategy::OneForAll)
+            .supervisor_strategy(SupervisorStrategy::AllForOne)
             .build();
-        assert_eq!(orch.supervisor().lock().strategy(), SupervisorStrategy::OneForAll);
+        assert_eq!(
+            orch.supervisor().lock().strategy(),
+            SupervisorStrategy::AllForOne
+        );
     }
 }
