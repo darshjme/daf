@@ -249,7 +249,7 @@ impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
             max_memory_bytes: Some(512 * 1024 * 1024), // 512 MiB
-            max_cpu_ms: Some(300_000),                  // 5 minutes
+            max_cpu_ms: Some(300_000),                 // 5 minutes
             max_connections: Some(64),
             max_message_queue: Some(1024),
         }
@@ -382,9 +382,7 @@ impl AgentContext {
     /// Duration since the agent was spawned.
     pub fn uptime(&self) -> Duration {
         let now = Utc::now();
-        (now - self.spawn_time)
-            .to_std()
-            .unwrap_or(Duration::ZERO)
+        (now - self.spawn_time).to_std().unwrap_or(Duration::ZERO)
     }
 }
 

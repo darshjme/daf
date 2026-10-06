@@ -23,8 +23,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, instrument};
 use uuid::Uuid;
 
-use daf_core::error::DafResult;
 use daf_core::AgentId;
+use daf_core::error::DafResult;
 use daf_graph::node::TaskSpec;
 
 use crate::mission::{Mission, MissionId};
@@ -392,11 +392,7 @@ pub struct Sprint {
 
 impl Sprint {
     /// Create a new sprint from a set of waves.
-    pub fn new(
-        name: impl Into<String>,
-        mission_id: MissionId,
-        waves: Vec<Wave>,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, mission_id: MissionId, waves: Vec<Wave>) -> Self {
         Self {
             id: SprintId::new(),
             name: name.into(),
@@ -602,8 +598,7 @@ impl SprintPlanner {
 
         if let Some(dur) = self.max_sprint_duration {
             let deadline = Utc::now()
-                + chrono::Duration::from_std(dur)
-                    .unwrap_or_else(|_| chrono::Duration::hours(24));
+                + chrono::Duration::from_std(dur).unwrap_or_else(|_| chrono::Duration::hours(24));
             sprint = sprint.with_deadline(deadline);
         }
 

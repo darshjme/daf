@@ -13,7 +13,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-
 // ---------------------------------------------------------------------------
 // ResourceType
 // ---------------------------------------------------------------------------
@@ -64,7 +63,7 @@ impl fmt::Display for ResourceType {
 ///
 /// These flags mirror Terraform's `lifecycle` meta-argument, giving operators
 /// fine-grained control over destructive operations.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LifecyclePolicy {
     /// When replacing a resource, create the new one before destroying the old.
     /// This prevents downtime for resources that must always have at least one
@@ -78,16 +77,6 @@ pub struct LifecyclePolicy {
     /// List of config keys whose changes should be ignored during planning.
     /// Changes to these fields will not trigger an update or replace action.
     pub ignore_changes: Vec<String>,
-}
-
-impl Default for LifecyclePolicy {
-    fn default() -> Self {
-        Self {
-            create_before_destroy: false,
-            prevent_destroy: false,
-            ignore_changes: Vec::new(),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

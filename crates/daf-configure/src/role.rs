@@ -171,27 +171,42 @@ impl RoleLoader {
         let mut role = Role::new(name);
 
         // tasks/main.json
-        if let Some(tasks) = self.read_json_file::<Vec<TaskDef>>(&role_dir.join("tasks/main.json")).await? {
+        if let Some(tasks) = self
+            .read_json_file::<Vec<TaskDef>>(&role_dir.join("tasks/main.json"))
+            .await?
+        {
             role.tasks = tasks;
         }
 
         // handlers/main.json
-        if let Some(handlers) = self.read_json_file::<Vec<Handler>>(&role_dir.join("handlers/main.json")).await? {
+        if let Some(handlers) = self
+            .read_json_file::<Vec<Handler>>(&role_dir.join("handlers/main.json"))
+            .await?
+        {
             role.handlers = handlers;
         }
 
         // defaults/main.json
-        if let Some(defaults) = self.read_json_file::<HashMap<String, Value>>(&role_dir.join("defaults/main.json")).await? {
+        if let Some(defaults) = self
+            .read_json_file::<HashMap<String, Value>>(&role_dir.join("defaults/main.json"))
+            .await?
+        {
             role.defaults = defaults;
         }
 
         // vars/main.json
-        if let Some(vars) = self.read_json_file::<HashMap<String, Value>>(&role_dir.join("vars/main.json")).await? {
+        if let Some(vars) = self
+            .read_json_file::<HashMap<String, Value>>(&role_dir.join("vars/main.json"))
+            .await?
+        {
             role.vars = vars;
         }
 
         // meta/main.json
-        if let Some(meta) = self.read_json_file::<RoleMeta>(&role_dir.join("meta/main.json")).await? {
+        if let Some(meta) = self
+            .read_json_file::<RoleMeta>(&role_dir.join("meta/main.json"))
+            .await?
+        {
             role.dependencies = meta.dependencies;
             role.description = meta.description;
             role.metadata = meta.metadata;
@@ -407,7 +422,10 @@ mod tests {
 
         let result = resolve_dependency_order(&roles);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), RoleError::CyclicDependency(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            RoleError::CyclicDependency(_)
+        ));
     }
 
     #[test]

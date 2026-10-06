@@ -2,7 +2,7 @@
 //!
 //! The [`AgentBuilder`] is the primary entry point for creating DAF agents.
 //! It provides a chainable API that collects agent metadata, handlers, and
-//! configuration, then produces an [`AgentInstance`](crate::lifecycle::AgentInstance)
+//! configuration, then produces an [`AgentInstance`]
 //! ready to start.
 //!
 //! # Examples
@@ -29,7 +29,7 @@ use daf_core::error::{DafError, DafResult};
 use uuid::Uuid;
 
 use crate::config::SdkConfig;
-use crate::handler::{HandlerRegistry, MessageHandler, TaskHandler, EventHandler};
+use crate::handler::{EventHandler, HandlerRegistry, MessageHandler, TaskHandler};
 use crate::lifecycle::AgentInstance;
 use crate::middleware::Middleware;
 
@@ -139,33 +139,21 @@ impl AgentBuilder {
     /// - `"command:deploy"` — matches exactly
     /// - `"event:*"` — matches any `event:` prefix
     /// - `"*"` — catch-all
-    pub fn on_message(
-        mut self,
-        pattern: impl Into<String>,
-        handler: impl MessageHandler,
-    ) -> Self {
+    pub fn on_message(mut self, pattern: impl Into<String>, handler: impl MessageHandler) -> Self {
         self.handler_registry
             .register_message_handler(pattern, handler);
         self
     }
 
     /// Register a task handler for the given capability.
-    pub fn on_task(
-        mut self,
-        capability: impl Into<String>,
-        handler: impl TaskHandler,
-    ) -> Self {
+    pub fn on_task(mut self, capability: impl Into<String>, handler: impl TaskHandler) -> Self {
         self.handler_registry
             .register_task_handler(capability, handler);
         self
     }
 
     /// Register an event handler for the given event type pattern.
-    pub fn on_event(
-        mut self,
-        pattern: impl Into<String>,
-        handler: impl EventHandler,
-    ) -> Self {
+    pub fn on_event(mut self, pattern: impl Into<String>, handler: impl EventHandler) -> Self {
         self.handler_registry
             .register_event_handler(pattern, handler);
         self
@@ -173,15 +161,13 @@ impl AgentBuilder {
 
     /// Set the default message handler for unmatched messages.
     pub fn default_message_handler(mut self, handler: impl MessageHandler) -> Self {
-        self.handler_registry
-            .set_default_message_handler(handler);
+        self.handler_registry.set_default_message_handler(handler);
         self
     }
 
     /// Set the default task handler for unmatched capabilities.
     pub fn default_task_handler(mut self, handler: impl TaskHandler) -> Self {
-        self.handler_registry
-            .set_default_task_handler(handler);
+        self.handler_registry.set_default_task_handler(handler);
         self
     }
 
@@ -213,9 +199,7 @@ impl AgentBuilder {
     pub fn build(self) -> DafResult<AgentInstance> {
         // Validate required fields.
         if self.name.is_empty() {
-            return Err(DafError::ConfigError(
-                "agent name must not be empty".into(),
-            ));
+            return Err(DafError::ConfigError("agent name must not be empty".into()));
         }
 
         // Validate configuration.
@@ -230,9 +214,7 @@ impl AgentBuilder {
         manifest.metadata = self.metadata;
 
         if let Some(desc) = &self.description {
-            manifest
-                .metadata
-                .insert("description".into(), desc.clone());
+            manifest.metadata.insert("description".into(), desc.clone());
         }
 
         // Build the agent context.
@@ -336,9 +318,7 @@ mod tests {
         let mut config = SdkConfig::development();
         config.max_concurrent_tasks = 0; // invalid
 
-        let result = AgentBuilder::new("test")
-            .with_config(config)
-            .build();
+        let result = AgentBuilder::new("test").with_config(config).build();
         assert!(result.is_err());
     }
 

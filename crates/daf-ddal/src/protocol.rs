@@ -309,14 +309,22 @@ impl Frame {
         }
 
         // Peek at payload_len to know total frame size.
-        let payload_len =
-            u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]);
+        let payload_len = u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]);
 
         if payload_len > MAX_PAYLOAD_SIZE {
             return Err(FrameDecodeError::PayloadTooLarge {
                 size: payload_len,
                 max: MAX_PAYLOAD_SIZE,
             });
+        }
+
+        let version = ProtocolVersion {
+            major: buf[4],
+            minor: buf[5],
+            patch: buf[6],
+        };
+        if !ProtocolVersion::CURRENT.is_compatible_with(&version) {
+            return Err(FrameDecodeError::UnsupportedVersion(version));
         }
 
         let total_frame_size = HEADER_SIZE + payload_len as usize;
@@ -334,13 +342,16 @@ impl Frame {
         let major = frame_buf.get_u8();
         let minor = frame_buf.get_u8();
         let patch = frame_buf.get_u8();
-        let version = ProtocolVersion { major, minor, patch };
+        let version = ProtocolVersion {
+            major,
+            minor,
+            patch,
+        };
 
         // Frame type
         let frame_type_byte = frame_buf.get_u8();
-        let frame_type = FrameType::from_u8(frame_type_byte).ok_or(
-            FrameDecodeError::UnknownFrameType(frame_type_byte),
-        )?;
+        let frame_type = FrameType::from_u8(frame_type_byte)
+            .ok_or(FrameDecodeError::UnknownFrameType(frame_type_byte))?;
 
         // Stream ID
         let stream_id = frame_buf.get_u32();
@@ -396,6 +407,8 @@ impl fmt::Display for Frame {
 /// Errors that can occur while decoding a frame from the wire.
 #[derive(Debug, thiserror::Error)]
 pub enum FrameDecodeError {
+    #[error("unsupported protocol version: {0}")]
+    UnsupportedVersion(ProtocolVersion),
     #[error("invalid magic bytes: expected {expected:02X?}, got {got:02X?}", expected = MAGIC_BYTES)]
     InvalidMagic { got: [u8; 4] },
 
@@ -416,6 +429,19 @@ pub enum FrameDecodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incompatible_version_is_rejected_before_payload_arrives() {
+        let mut frame = Frame::data(1, Bytes::from_static(b"payload"));
+        frame.version.major = 99;
+        frame.checksum = frame.compute_checksum();
+        let bytes = frame.encode_to_bytes();
+        let mut header = BytesMut::from(&bytes[..HEADER_SIZE]);
+        assert!(matches!(
+            Frame::decode_from_bytes(&mut header),
+            Err(FrameDecodeError::UnsupportedVersion(_))
+        ));
+    }
 
     #[test]
     fn protocol_version_display() {

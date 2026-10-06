@@ -323,15 +323,19 @@ mod tests {
 
     #[test]
     fn empty_cluster_name_fails_validation() {
-        let mut cfg = DafConfig::default();
-        cfg.cluster_name = String::new();
+        let cfg = DafConfig {
+            cluster_name: String::new(),
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn zero_max_agents_fails_validation() {
-        let mut cfg = DafConfig::default();
-        cfg.max_agents = 0;
+        let cfg = DafConfig {
+            max_agents: 0,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 

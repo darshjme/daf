@@ -233,6 +233,8 @@ pub struct ChannelPool {
     /// created it. The pool only holds the inbound writer so the codec can
     /// push frames to the right channel.
     inbound_writers: DashMap<u32, ChannelInboundWriter>,
+    outbound_receivers: DashMap<u32, mpsc::Receiver<Frame>>,
+    lifecycle_lock: std::sync::Mutex<()>,
 
     /// Map from stream_id to channel_id (for frame dispatch).
     stream_to_channel: DashMap<u32, u32>,
@@ -252,6 +254,8 @@ impl ChannelPool {
     pub fn new() -> Self {
         Self {
             inbound_writers: DashMap::new(),
+            outbound_receivers: DashMap::new(),
+            lifecycle_lock: std::sync::Mutex::new(()),
             stream_to_channel: DashMap::new(),
             next_channel_id: AtomicU32::new(1), // 0 reserved for control
             channel_buffer_size: DEFAULT_CHANNEL_BUFFER,
@@ -263,9 +267,11 @@ impl ChannelPool {
     pub fn with_limits(channel_buffer_size: usize, max_channels: u32) -> Self {
         Self {
             inbound_writers: DashMap::new(),
+            outbound_receivers: DashMap::new(),
+            lifecycle_lock: std::sync::Mutex::new(()),
             stream_to_channel: DashMap::new(),
             next_channel_id: AtomicU32::new(1),
-            channel_buffer_size,
+            channel_buffer_size: channel_buffer_size.max(1),
             max_channels,
         }
     }
@@ -279,27 +285,29 @@ impl ChannelPool {
     ///
     /// Returns `Err` if the pool has reached its channel limit.
     #[instrument(skip(self), fields(source = %source, target = %target))]
-    pub fn open(
-        &self,
-        source: AgentId,
-        target: AgentId,
-    ) -> Result<Channel, ChannelError> {
-        let id = self.next_channel_id.fetch_add(1, Ordering::Relaxed);
-
-        if id > self.max_channels {
+    pub fn open(&self, source: AgentId, target: AgentId) -> Result<Channel, ChannelError> {
+        let _guard = self
+            .lifecycle_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if self.active_count() >= self.max_channels as usize {
             return Err(ChannelError::PoolExhausted {
                 max: self.max_channels,
             });
         }
 
+        let id = self
+            .next_channel_id
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .map_err(|_| ChannelError::PoolExhausted {
+                max: self.max_channels,
+            })?;
+
         let stream_id = id; // 1:1 mapping for now
 
         // Outbound: application → codec → socket
-        let (outbound_tx, _outbound_rx) = mpsc::channel::<Frame>(self.channel_buffer_size);
-        // We intentionally drop _outbound_rx here — the transport layer should
-        // call `take_outbound_receiver` to claim it. For this design, the
-        // outbound path is handled by the Framed sink directly; the tx is the
-        // application's handle.
+        let (outbound_tx, outbound_rx) = mpsc::channel::<Frame>(self.channel_buffer_size);
+        self.outbound_receivers.insert(id, outbound_rx);
 
         // Inbound: socket → codec → application
         let (inbound_tx, inbound_rx) = mpsc::channel::<Frame>(self.channel_buffer_size);
@@ -337,9 +345,21 @@ impl ChannelPool {
         Some(writer.clone())
     }
 
+    /// Claim the outbound queue exactly once for the connection's writer task.
+    pub fn take_outbound_receiver(&self, channel_id: u32) -> Option<mpsc::Receiver<Frame>> {
+        self.outbound_receivers
+            .remove(&channel_id)
+            .map(|(_, rx)| rx)
+    }
+
     /// Remove a channel from the pool (called during teardown).
     #[instrument(skip(self))]
     pub fn close(&self, channel_id: u32) {
+        let _guard = self
+            .lifecycle_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.outbound_receivers.remove(&channel_id);
         if let Some((_, _writer)) = self.inbound_writers.remove(&channel_id) {
             // Find and remove the stream mapping.
             self.stream_to_channel.retain(|_, cid| *cid != channel_id);
@@ -422,6 +442,37 @@ mod tests {
 
     fn agents() -> (AgentId, AgentId) {
         (AgentId::new(), AgentId::new())
+    }
+
+    #[tokio::test]
+    async fn outbound_queue_is_claimable_and_preserves_backpressure() {
+        let pool = ChannelPool::with_limits(1, 1);
+        let mut channel = pool.open(AgentId::new(), AgentId::new()).unwrap();
+        channel.state = ChannelState::Open;
+        let mut outbound = pool.take_outbound_receiver(channel.id).unwrap();
+        assert!(pool.take_outbound_receiver(channel.id).is_none());
+        channel.send(Bytes::from_static(b"first")).await.unwrap();
+        let send = channel.send(Bytes::from_static(b"second"));
+        tokio::pin!(send);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut send)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            outbound.recv().await.unwrap().payload,
+            Bytes::from_static(b"first")
+        );
+        send.await.unwrap();
+        assert_eq!(
+            outbound.recv().await.unwrap().payload,
+            Bytes::from_static(b"second")
+        );
+        pool.close(channel.id);
+        assert!(
+            pool.open(AgentId::new(), AgentId::new()).is_ok(),
+            "closed channels must release capacity"
+        );
     }
 
     #[test]

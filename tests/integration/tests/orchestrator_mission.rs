@@ -8,11 +8,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use daf_core::agent::{Agent, AgentCapability, AgentContext, AgentId, AgentKind, AgentManifest};
-use daf_core::error::{DafError, DafResult};
+use daf_core::agent::{Agent, AgentId};
+use daf_core::error::DafResult;
 use daf_core::message::{Message, MessageKind};
 use daf_integration_tests::*;
 
@@ -86,10 +85,7 @@ impl Mission {
         self.execution_log.push("mission planned".to_string());
     }
 
-    async fn execute(
-        &mut self,
-        specialists: &HashMap<AgentId, Arc<TestAgent>>,
-    ) -> DafResult<()> {
+    async fn execute(&mut self, specialists: &HashMap<AgentId, Arc<TestAgent>>) -> DafResult<()> {
         self.state = MissionState::Executing;
         self.execution_log.push("execution started".to_string());
 
@@ -175,11 +171,14 @@ async fn full_mission_lifecycle() {
     specialists.insert(specialist_id, specialist.clone());
 
     let mut mission = Mission::new("build-feature");
+    assert!(!mission.id.is_nil());
+    assert_eq!(mission.name, "build-feature");
 
     // Plan phase.
     mission.plan();
 
     let mut phase = Phase::new("generate-code");
+    assert!(!phase.id.is_nil());
     phase.assigned_specialist = Some(specialist_id);
     mission.add_phase(phase);
 
@@ -201,9 +200,21 @@ async fn full_mission_lifecycle() {
 
     assert_eq!(mission.phases[1].state, PhaseState::Completed);
 
-    assert!(mission.execution_log.contains(&"mission planned".to_string()));
-    assert!(mission.execution_log.contains(&"execution started".to_string()));
-    assert!(mission.execution_log.contains(&"mission completed".to_string()));
+    assert!(
+        mission
+            .execution_log
+            .contains(&"mission planned".to_string())
+    );
+    assert!(
+        mission
+            .execution_log
+            .contains(&"execution started".to_string())
+    );
+    assert!(
+        mission
+            .execution_log
+            .contains(&"mission completed".to_string())
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -273,14 +284,8 @@ async fn specialist_routing_with_mission_phases() {
     // Assert
     assert!(result.is_ok());
     assert_eq!(mission.state, MissionState::Completed);
-    assert_eq!(
-        mission.phases[0].result.as_ref().unwrap()["warnings"],
-        0
-    );
-    assert_eq!(
-        mission.phases[1].result.as_ref().unwrap()["passed"],
-        42
-    );
+    assert_eq!(mission.phases[0].result.as_ref().unwrap()["warnings"], 0);
+    assert_eq!(mission.phases[1].result.as_ref().unwrap()["passed"], 42);
 }
 
 // ---------------------------------------------------------------------------
@@ -338,7 +343,7 @@ async fn agent_handoff_during_mission() {
         .expect("handle handoff");
 
     // Agent B executes based on the handed-off plan.
-    let exec_result = agent_b.execute(&ctx_b).await.expect("executor execute");
+    let _exec_result = agent_b.execute(&ctx_b).await.expect("executor execute");
 
     // Assert
     assert_eq!(agent_b.message_count(), 1);
@@ -360,10 +365,16 @@ async fn multi_phase_mission() {
 
     // Create 4 specialists for a 4-phase mission.
     let phase_configs = vec![
-        ("research", serde_json::json!({"findings": ["paper-a", "paper-b"]})),
+        (
+            "research",
+            serde_json::json!({"findings": ["paper-a", "paper-b"]}),
+        ),
         ("design", serde_json::json!({"schema": "v2", "tables": 5})),
         ("implement", serde_json::json!({"files_written": 12})),
-        ("deploy", serde_json::json!({"url": "https://app.example.com"})),
+        (
+            "deploy",
+            serde_json::json!({"url": "https://app.example.com"}),
+        ),
     ];
 
     let mut router = SpecialistRouter::new();
@@ -395,7 +406,11 @@ async fn multi_phase_mission() {
     assert_eq!(mission.phases.len(), 4);
 
     for (i, phase) in mission.phases.iter().enumerate() {
-        assert_eq!(phase.state, PhaseState::Completed, "phase {i} should complete");
+        assert_eq!(
+            phase.state,
+            PhaseState::Completed,
+            "phase {i} should complete"
+        );
         assert!(phase.result.is_some(), "phase {i} should have a result");
     }
 
@@ -423,7 +438,7 @@ async fn mission_failure_stops_at_failed_phase() {
     init_tracing();
 
     // Create a specialist that will fail.
-    let failing_id = AgentId::new();
+    let _failing_id = AgentId::new();
     // Use a TestAgent but override behavior by having no execute_result set
     // — we simulate failure by not including the specialist in the map.
 

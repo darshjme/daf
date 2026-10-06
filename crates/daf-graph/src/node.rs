@@ -236,13 +236,17 @@ impl Node {
 
     /// Check if all dependencies are in terminal-success states given a lookup fn.
     pub fn dependencies_satisfied(&self, is_done: impl Fn(&NodeId) -> bool) -> bool {
-        self.dependencies.iter().all(|dep| is_done(dep))
+        self.dependencies.iter().all(is_done)
     }
 }
 
 impl fmt::Display for Node {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{}] {} ({}) — {}", self.id, self.name, self.kind, self.state)
+        write!(
+            f,
+            "[{}] {} ({}) — {}",
+            self.id, self.name, self.kind, self.state
+        )
     }
 }
 

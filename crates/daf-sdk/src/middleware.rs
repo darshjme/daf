@@ -27,14 +27,14 @@
 //! ```
 
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use daf_core::AgentContext;
 use daf_core::error::{DafError, DafResult};
 use daf_core::message::Message;
-use daf_core::AgentContext;
 use tracing::{debug, warn};
 
 use crate::handler::MessageHandler;
@@ -326,7 +326,7 @@ impl Middleware for RetryMiddleware {
         next: &dyn MessageHandler,
     ) -> DafResult<Option<Message>> {
         let mut last_error = None;
-        let mut backoff = self.initial_backoff;
+        let mut backoff = self.initial_backoff.min(self.max_backoff);
 
         for attempt in 0..=self.max_retries {
             match next.handle_message(msg.clone(), ctx).await {
@@ -345,15 +345,14 @@ impl Middleware for RetryMiddleware {
                     );
 
                     tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(self.max_backoff);
+                    backoff = backoff.saturating_mul(2).min(self.max_backoff);
                     last_error = Some(e);
                 }
             }
         }
 
-        Err(last_error.unwrap_or_else(|| {
-            DafError::Internal("retry exhausted with no error".into())
-        }))
+        Err(last_error
+            .unwrap_or_else(|| DafError::Internal("retry exhausted with no error".into())))
     }
 
     fn name(&self) -> &str {
@@ -422,10 +421,7 @@ pub struct AuthMiddleware {
 
 impl AuthMiddleware {
     /// Create an auth middleware checking the given header for valid tokens.
-    pub fn new(
-        header_key: impl Into<String>,
-        valid_tokens: Vec<String>,
-    ) -> Self {
+    pub fn new(header_key: impl Into<String>, valid_tokens: Vec<String>) -> Self {
         Self {
             header_key: header_key.into(),
             valid_tokens,
@@ -442,20 +438,12 @@ impl Middleware for AuthMiddleware {
         next: &dyn MessageHandler,
     ) -> DafResult<Option<Message>> {
         match msg.headers.get(&self.header_key) {
-            Some(token) if self.valid_tokens.contains(token) => {
-                next.handle_message(msg, ctx).await
-            }
+            Some(token) if self.valid_tokens.contains(token) => next.handle_message(msg, ctx).await,
             Some(_) => Err(DafError::Unauthorized {
-                message: format!(
-                    "invalid auth token in header '{}'",
-                    self.header_key
-                ),
+                message: format!("invalid auth token in header '{}'", self.header_key),
             }),
             None => Err(DafError::Unauthorized {
-                message: format!(
-                    "missing auth header '{}'",
-                    self.header_key
-                ),
+                message: format!("missing auth header '{}'", self.header_key),
             }),
         }
     }
@@ -501,18 +489,14 @@ impl MiddlewareStack {
 
 /// Internal adapter that makes a middleware + next handler look like a
 /// single `MessageHandler`.
-struct MiddlewareAdapter {
-    middleware: Arc<dyn Middleware>,
-    next: Arc<dyn MessageHandler>,
+pub(crate) struct MiddlewareAdapter {
+    pub(crate) middleware: Arc<dyn Middleware>,
+    pub(crate) next: Arc<dyn MessageHandler>,
 }
 
 #[async_trait]
 impl MessageHandler for MiddlewareAdapter {
-    async fn handle_message(
-        &self,
-        msg: Message,
-        ctx: &AgentContext,
-    ) -> DafResult<Option<Message>> {
+    async fn handle_message(&self, msg: Message, ctx: &AgentContext) -> DafResult<Option<Message>> {
         self.middleware.process(msg, ctx, self.next.as_ref()).await
     }
 
@@ -523,11 +507,7 @@ impl MessageHandler for MiddlewareAdapter {
 
 #[async_trait]
 impl MessageHandler for MiddlewareStack {
-    async fn handle_message(
-        &self,
-        msg: Message,
-        ctx: &AgentContext,
-    ) -> DafResult<Option<Message>> {
+    async fn handle_message(&self, msg: Message, ctx: &AgentContext) -> DafResult<Option<Message>> {
         // Build the chain from inside out: handler ← layer[0] ← layer[1] ← ...
         let mut current: Arc<dyn MessageHandler> = Arc::clone(&self.handler);
 
@@ -554,8 +534,8 @@ impl MessageHandler for MiddlewareStack {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use daf_core::message::MessageKind;
     use daf_core::AgentId;
+    use daf_core::message::MessageKind;
     use uuid::Uuid;
 
     fn test_ctx() -> AgentContext {
@@ -664,10 +644,7 @@ mod tests {
 
     #[tokio::test]
     async fn auth_middleware_accepts_valid_token() {
-        let middleware = AuthMiddleware::new(
-            "authorization",
-            vec!["secret-token".into()],
-        );
+        let middleware = AuthMiddleware::new("authorization", vec!["secret-token".into()]);
         let handler = EchoHandler;
         let ctx = test_ctx();
         let msg = authed_msg("secret-token");
@@ -678,10 +655,7 @@ mod tests {
 
     #[tokio::test]
     async fn auth_middleware_rejects_invalid_token() {
-        let middleware = AuthMiddleware::new(
-            "authorization",
-            vec!["secret-token".into()],
-        );
+        let middleware = AuthMiddleware::new("authorization", vec!["secret-token".into()]);
         let handler = EchoHandler;
         let ctx = test_ctx();
         let msg = authed_msg("wrong-token");
@@ -693,10 +667,7 @@ mod tests {
 
     #[tokio::test]
     async fn auth_middleware_rejects_missing_header() {
-        let middleware = AuthMiddleware::new(
-            "authorization",
-            vec!["secret-token".into()],
-        );
+        let middleware = AuthMiddleware::new("authorization", vec!["secret-token".into()]);
         let handler = EchoHandler;
         let ctx = test_ctx();
         let msg = test_msg(); // no auth header

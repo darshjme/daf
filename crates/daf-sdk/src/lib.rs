@@ -44,7 +44,7 @@
 //! # Modules
 //!
 //! - [`prelude`] — One-line import for everything an agent developer needs.
-//! - [`builder`] — Fluent [`AgentBuilder`](builder::AgentBuilder) API.
+//! - [`builder`] — Fluent [`AgentBuilder`] API.
 //! - [`handler`] — Message, task, and event handler traits with composition.
 //! - [`middleware`] — Cross-cutting concerns: logging, metrics, retry, timeout, auth.
 //! - [`lifecycle`] — Agent instance management: start, stop, restart, pause, health.

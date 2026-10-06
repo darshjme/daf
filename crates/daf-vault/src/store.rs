@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
@@ -90,6 +90,7 @@ pub struct SledVaultStore {
     db: sled::Db,
     keyring: RwLock<KeyRing>,
     audit: Arc<AuditLog>,
+    operations: Mutex<()>,
 }
 
 impl SledVaultStore {
@@ -108,9 +109,10 @@ impl SledVaultStore {
             (meta_tree.get("salt")?, meta_tree.get("seal_check")?)
         {
             let mut salt = [0u8; 32];
-            if salt_iv.len() == 32 {
-                salt.copy_from_slice(&salt_iv);
+            if salt_iv.len() != 32 {
+                return Err(VaultError::Storage("invalid vault salt length".into()));
             }
+            salt.copy_from_slice(&salt_iv);
 
             // Restore wrapped keys.
             let mut wrapped = HashMap::new();
@@ -129,6 +131,7 @@ impl SledVaultStore {
             db,
             keyring: RwLock::new(keyring),
             audit,
+            operations: Mutex::new(()),
         })
     }
 
@@ -162,10 +165,9 @@ impl SledVaultStore {
     /// Unseal the vault with the operator passphrase.
     pub fn unseal(&self, passphrase: &[u8]) -> VaultResult<()> {
         let mut kr = self.keyring.write();
-        kr.unseal(passphrase).map_err(|e| {
+        kr.unseal(passphrase).inspect_err(|e| {
             self.audit
                 .record(AuditEntry::failure(AuditAction::Unseal, e.to_string()));
-            e
         })?;
         self.audit.record(AuditEntry::success(AuditAction::Unseal));
         Ok(())
@@ -201,14 +203,14 @@ impl VaultStore for SledVaultStore {
         plaintext: &[u8],
         policy: AccessPolicy,
     ) -> VaultResult<SecretRef> {
+        let _operation = self.operations.lock();
         let secrets_tree = self.db.open_tree("secrets")?;
 
         // Check for duplicate name.
         if secrets_tree.contains_key(name)? {
             let err = VaultError::Storage(format!("secret '{}' already exists", name));
-            self.audit.record(
-                AuditEntry::failure(AuditAction::Write, err.to_string()),
-            );
+            self.audit
+                .record(AuditEntry::failure(AuditAction::Write, err.to_string()));
             return Err(err);
         }
 
@@ -241,13 +243,13 @@ impl VaultStore for SledVaultStore {
         self.db.flush()?;
 
         debug!(name, "secret stored");
-        self.audit.record(
-            AuditEntry::success(AuditAction::Write).with_secret(secret_ref.clone()),
-        );
+        self.audit
+            .record(AuditEntry::success(AuditAction::Write).with_secret(secret_ref.clone()));
         Ok(secret_ref)
     }
 
     async fn get_secret(&self, name: &str) -> VaultResult<Secret> {
+        let _operation = self.operations.lock();
         let secrets_tree = self.db.open_tree("secrets")?;
 
         let data = secrets_tree
@@ -262,13 +264,13 @@ impl VaultStore for SledVaultStore {
         let mut secret = stored.secret;
         secret.encrypted_value = plaintext;
 
-        self.audit.record(
-            AuditEntry::success(AuditAction::Read).with_secret(secret.as_ref()),
-        );
+        self.audit
+            .record(AuditEntry::success(AuditAction::Read).with_secret(secret.as_ref()));
         Ok(secret)
     }
 
     async fn list_secrets(&self) -> VaultResult<Vec<SecretRef>> {
+        let _operation = self.operations.lock();
         let secrets_tree = self.db.open_tree("secrets")?;
         let mut refs = Vec::new();
 
@@ -283,6 +285,7 @@ impl VaultStore for SledVaultStore {
     }
 
     async fn delete_secret(&self, name: &str) -> VaultResult<()> {
+        let _operation = self.operations.lock();
         let secrets_tree = self.db.open_tree("secrets")?;
 
         let data = secrets_tree
@@ -299,13 +302,13 @@ impl VaultStore for SledVaultStore {
         self.db.flush()?;
 
         debug!(name, "secret deleted");
-        self.audit.record(
-            AuditEntry::success(AuditAction::Delete).with_secret(stored.secret.as_ref()),
-        );
+        self.audit
+            .record(AuditEntry::success(AuditAction::Delete).with_secret(stored.secret.as_ref()));
         Ok(())
     }
 
     async fn rotate_secret(&self, name: &str, new_plaintext: &[u8]) -> VaultResult<SecretRef> {
+        let _operation = self.operations.lock();
         let secrets_tree = self.db.open_tree("secrets")?;
 
         let data = secrets_tree
@@ -330,13 +333,9 @@ impl VaultStore for SledVaultStore {
             self.persist_wrapped_key(wdk)?;
         }
 
-        // Remove old data key.
+        // Keep the old key until the replacement secret is durable. A crash
+        // before publication must leave the old ciphertext decryptable.
         let old_key_id = stored.data_key_id;
-        {
-            let mut kr = self.keyring.write();
-            kr.remove_data_key(&old_key_id);
-        }
-        self.remove_persisted_key(&old_key_id)?;
 
         // Update the secret.
         stored.secret.encrypted_value = encrypted;
@@ -349,10 +348,13 @@ impl VaultStore for SledVaultStore {
         secrets_tree.insert(name, data)?;
         self.db.flush()?;
 
+        self.keyring.write().remove_data_key(&old_key_id);
+        self.remove_persisted_key(&old_key_id)?;
+        self.db.flush()?;
+
         debug!(name, version = secret_ref.version, "secret rotated");
-        self.audit.record(
-            AuditEntry::success(AuditAction::Rotate).with_secret(secret_ref.clone()),
-        );
+        self.audit
+            .record(AuditEntry::success(AuditAction::Rotate).with_secret(secret_ref.clone()));
         Ok(secret_ref)
     }
 }
@@ -369,6 +371,7 @@ pub struct InMemoryVaultStore {
     secrets: RwLock<HashMap<String, StoredSecret>>,
     keyring: RwLock<KeyRing>,
     audit: Arc<AuditLog>,
+    operations: Mutex<()>,
 }
 
 impl InMemoryVaultStore {
@@ -381,6 +384,7 @@ impl InMemoryVaultStore {
             secrets: RwLock::new(HashMap::new()),
             keyring: RwLock::new(kr),
             audit,
+            operations: Mutex::new(()),
         })
     }
 
@@ -409,6 +413,7 @@ impl VaultStore for InMemoryVaultStore {
         plaintext: &[u8],
         policy: AccessPolicy,
     ) -> VaultResult<SecretRef> {
+        let _operation = self.operations.lock();
         if self.secrets.read().contains_key(name) {
             return Err(VaultError::Storage(format!(
                 "secret '{}' already exists",
@@ -428,13 +433,13 @@ impl VaultStore for InMemoryVaultStore {
         };
         self.secrets.write().insert(name.to_string(), stored);
 
-        self.audit.record(
-            AuditEntry::success(AuditAction::Write).with_secret(secret_ref.clone()),
-        );
+        self.audit
+            .record(AuditEntry::success(AuditAction::Write).with_secret(secret_ref.clone()));
         Ok(secret_ref)
     }
 
     async fn get_secret(&self, name: &str) -> VaultResult<Secret> {
+        let _operation = self.operations.lock();
         let secrets = self.secrets.read();
         let stored = secrets
             .get(name)
@@ -446,13 +451,13 @@ impl VaultStore for InMemoryVaultStore {
         let mut secret = stored.secret.clone();
         secret.encrypted_value = plaintext;
 
-        self.audit.record(
-            AuditEntry::success(AuditAction::Read).with_secret(secret.as_ref()),
-        );
+        self.audit
+            .record(AuditEntry::success(AuditAction::Read).with_secret(secret.as_ref()));
         Ok(secret)
     }
 
     async fn list_secrets(&self) -> VaultResult<Vec<SecretRef>> {
+        let _operation = self.operations.lock();
         let refs: Vec<SecretRef> = self
             .secrets
             .read()
@@ -465,6 +470,7 @@ impl VaultStore for InMemoryVaultStore {
     }
 
     async fn delete_secret(&self, name: &str) -> VaultResult<()> {
+        let _operation = self.operations.lock();
         let stored = self
             .secrets
             .write()
@@ -473,13 +479,13 @@ impl VaultStore for InMemoryVaultStore {
 
         self.keyring.write().remove_data_key(&stored.data_key_id);
 
-        self.audit.record(
-            AuditEntry::success(AuditAction::Delete).with_secret(stored.secret.as_ref()),
-        );
+        self.audit
+            .record(AuditEntry::success(AuditAction::Delete).with_secret(stored.secret.as_ref()));
         Ok(())
     }
 
     async fn rotate_secret(&self, name: &str, new_plaintext: &[u8]) -> VaultResult<SecretRef> {
+        let _operation = self.operations.lock();
         let mut secrets = self.secrets.write();
         let stored = secrets
             .get_mut(name)
@@ -497,9 +503,8 @@ impl VaultStore for InMemoryVaultStore {
         stored.data_key_id = new_dk.id;
 
         let secret_ref = stored.secret.as_ref();
-        self.audit.record(
-            AuditEntry::success(AuditAction::Rotate).with_secret(secret_ref.clone()),
-        );
+        self.audit
+            .record(AuditEntry::success(AuditAction::Rotate).with_secret(secret_ref.clone()));
         Ok(secret_ref)
     }
 }
@@ -521,7 +526,12 @@ mod tests {
     async fn store_and_retrieve() {
         let store = make_store().await;
         store
-            .store_secret("api_key", SecretKind::ApiKey, b"sk-123", AccessPolicy::AnyAgent)
+            .store_secret(
+                "api_key",
+                SecretKind::ApiKey,
+                b"sk-123",
+                AccessPolicy::AnyAgent,
+            )
             .await
             .unwrap();
 
@@ -565,7 +575,12 @@ mod tests {
     async fn delete_secret() {
         let store = make_store().await;
         store
-            .store_secret("ephemeral", SecretKind::Token, b"tok", AccessPolicy::AnyAgent)
+            .store_secret(
+                "ephemeral",
+                SecretKind::Token,
+                b"tok",
+                AccessPolicy::AnyAgent,
+            )
             .await
             .unwrap();
 
@@ -577,7 +592,12 @@ mod tests {
     async fn rotate_secret() {
         let store = make_store().await;
         store
-            .store_secret("rotatable", SecretKind::ApiKey, b"old", AccessPolicy::AnyAgent)
+            .store_secret(
+                "rotatable",
+                SecretKind::ApiKey,
+                b"old",
+                AccessPolicy::AnyAgent,
+            )
             .await
             .unwrap();
 
@@ -593,7 +613,12 @@ mod tests {
     async fn sealed_store_rejects_operations() {
         let store = make_store().await;
         store
-            .store_secret("before_seal", SecretKind::Token, b"v", AccessPolicy::AnyAgent)
+            .store_secret(
+                "before_seal",
+                SecretKind::Token,
+                b"v",
+                AccessPolicy::AnyAgent,
+            )
             .await
             .unwrap();
 
@@ -601,10 +626,12 @@ mod tests {
 
         // All operations should fail.
         assert!(store.get_secret("before_seal").await.is_err());
-        assert!(store
-            .store_secret("new", SecretKind::Token, b"x", AccessPolicy::AnyAgent)
-            .await
-            .is_err());
+        assert!(
+            store
+                .store_secret("new", SecretKind::Token, b"x", AccessPolicy::AnyAgent)
+                .await
+                .is_err()
+        );
 
         // Unseal and verify.
         store.unseal(b"test-pass").unwrap();
@@ -626,7 +653,50 @@ mod tests {
 
         assert_eq!(audit.len(), 3);
         let actions: Vec<_> = audit.entries().iter().map(|e| e.action).collect();
-        assert_eq!(actions, vec![AuditAction::Write, AuditAction::Read, AuditAction::Delete]);
+        assert_eq!(
+            actions,
+            vec![AuditAction::Write, AuditAction::Read, AuditAction::Delete]
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_writes_preserve_unique_secret_name() {
+        let store = Arc::new(make_store().await);
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let store = store.clone();
+            tasks.push(tokio::spawn(async move {
+                store
+                    .store_secret("same", SecretKind::Token, b"value", AccessPolicy::AnyAgent)
+                    .await
+            }));
+        }
+        let mut successes = 0;
+        for task in tasks {
+            successes += usize::from(task.await.unwrap().is_ok());
+        }
+        assert_eq!(successes, 1);
+        assert_eq!(store.list_secrets().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn rotated_sled_secret_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = SledVaultStore::open(dir.path(), Arc::new(AuditLog::new())).unwrap();
+            store.initialize(b"pass").unwrap();
+            store
+                .store_secret("key", SecretKind::Token, b"old", AccessPolicy::AnyAgent)
+                .await
+                .unwrap();
+            store.rotate_secret("key", b"new").await.unwrap();
+            assert_eq!(store.db.open_tree("keys").unwrap().len(), 1);
+        }
+        let reopened = SledVaultStore::open(dir.path(), Arc::new(AuditLog::new())).unwrap();
+        reopened.unseal(b"pass").unwrap();
+        let secret = reopened.get_secret("key").await.unwrap();
+        assert_eq!(secret.encrypted_value, b"new");
+        assert_eq!(secret.version, 2);
     }
 
     #[tokio::test]
@@ -639,7 +709,12 @@ mod tests {
             store.initialize(b"sled-pass").unwrap();
 
             store
-                .store_secret("db_password", SecretKind::Password, b"s3cret", AccessPolicy::AnyAgent)
+                .store_secret(
+                    "db_password",
+                    SecretKind::Password,
+                    b"s3cret",
+                    AccessPolicy::AnyAgent,
+                )
                 .await
                 .unwrap();
 

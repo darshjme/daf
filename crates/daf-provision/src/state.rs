@@ -19,7 +19,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use daf_core::{DafError, DafResult};
 
@@ -311,34 +311,17 @@ impl StateStore for FileStateStore {
             ));
         }
 
-        // Attempt to create the lock file exclusively.
-        if self.lock_path.exists() {
-            // Check if the lock is stale (older than 10 minutes).
-            if let Ok(metadata) = tokio::fs::metadata(&self.lock_path).await {
-                if let Ok(modified) = metadata.modified() {
-                    let age = modified.elapsed().unwrap_or_default();
-                    if age.as_secs() > 600 {
-                        warn!(
-                            lock_path = %self.lock_path.display(),
-                            age_secs = age.as_secs(),
-                            "removing stale lock file"
-                        );
-                        let _ = tokio::fs::remove_file(&self.lock_path).await;
-                    } else {
-                        return Err(DafError::Internal(format!(
-                            "state is locked by another process (lock file: {})",
-                            self.lock_path.display()
-                        )));
-                    }
-                }
-            }
-        }
-
-        tokio::fs::write(&self.lock_path, format!("pid:{}", std::process::id()))
+        // Exclusive creation is atomic across independent store instances and
+        // processes. Age alone cannot prove a lock is stale: an apply may run
+        // longer than ten minutes. Recovery requires operator intervention.
+        tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.lock_path)
             .await
             .map_err(|e| {
                 DafError::Internal(format!(
-                    "failed to create lock file {}: {e}",
+                    "failed to acquire state lock {}: {e}",
                     self.lock_path.display()
                 ))
             })?;
@@ -354,7 +337,9 @@ impl StateStore for FileStateStore {
             return Ok(());
         }
 
-        let _ = tokio::fs::remove_file(&self.lock_path).await;
+        tokio::fs::remove_file(&self.lock_path)
+            .await
+            .map_err(|e| DafError::Internal(format!("failed to release state lock: {e}")))?;
         *locked = false;
         debug!(lock_path = %self.lock_path.display(), "released state lock");
         Ok(())
@@ -547,6 +532,20 @@ mod tests {
 
         // Now it should succeed.
         store.lock().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn independent_file_stores_cannot_both_acquire_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let first = FileStateStore::new(&path);
+        let second = FileStateStore::new(&path);
+        let (a, b) = tokio::join!(first.lock(), second.lock());
+        assert_ne!(a.is_ok(), b.is_ok());
+        first.unlock().await.unwrap();
+        second.unlock().await.unwrap();
+        first.lock().await.unwrap();
+        first.unlock().await.unwrap();
     }
 
     #[tokio::test]

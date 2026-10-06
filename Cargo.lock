@@ -762,6 +762,80 @@ dependencies = [
 ]
 
 [[package]]
+name = "daf-example-basic-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "daf-core",
+ "daf-sdk",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "daf-example-configuration"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "daf-configure",
+ "daf-core",
+ "daf-ddal",
+ "daf-runtime",
+ "daf-sdk",
+ "daf-transport",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "daf-example-infrastructure"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "daf-core",
+ "daf-ddal",
+ "daf-provision",
+ "daf-runtime",
+ "daf-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "daf-example-multi-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "daf-core",
+ "daf-ddal",
+ "daf-sdk",
+ "daf-transport",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "daf-graph"
 version = "0.1.0"
 dependencies = [
@@ -799,9 +873,11 @@ dependencies = [
  "daf-runtime",
  "daf-sdk",
  "daf-transport",
+ "futures-util",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "uuid",

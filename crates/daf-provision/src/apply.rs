@@ -319,12 +319,7 @@ impl Applier {
         let provider_name = state
             .get_resource(&change.resource_name)
             .map(|r| r.spec.provider.clone())
-            .or_else(|| {
-                change
-                    .after
-                    .as_ref()
-                    .and_then(|_| Some("agent_pool".into()))
-            });
+            .or_else(|| change.after.as_ref().map(|_| "agent_pool".into()));
 
         // For creates, we need the spec from somewhere — look it up or infer.
         let provider_name = match &provider_name {

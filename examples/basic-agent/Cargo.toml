@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[[bin]]
+name = "daf-example-basic-agent"
+path = "main.rs"
+
 [dependencies]
 daf-sdk = { path = "../../crates/daf-sdk" }
 daf-core = { path = "../../crates/daf-core" }

@@ -7,9 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use uuid::Uuid;
 
-use daf_core::agent::{Agent, AgentContext, AgentId, AgentKind};
+use daf_core::agent::{Agent, AgentId};
 use daf_core::message::{Envelope, Message, MessageKind, Priority};
 use daf_integration_tests::*;
 
@@ -109,7 +108,10 @@ async fn conversation_tracking_across_turns() {
             .build();
         chan_b.send(response).await.expect("send response");
 
-        let reply = chan_a.recv(Duration::from_secs(2)).await.expect("recv reply");
+        let reply = chan_a
+            .recv(Duration::from_secs(2))
+            .await
+            .expect("recv reply");
         assert_eq!(reply.correlation_id, Some(req_id));
     }
 
@@ -196,18 +198,10 @@ async fn message_routing_to_correct_target() {
     let (router_to_b, b_from_router) = TestChannel::pair(16);
 
     // Route a message intended for worker A.
-    let msg_for_a = command_message(
-        router_id,
-        worker_a_id,
-        serde_json::json!({"task": "lint"}),
-    );
+    let msg_for_a = command_message(router_id, worker_a_id, serde_json::json!({"task": "lint"}));
 
     // Route a message intended for worker B.
-    let msg_for_b = command_message(
-        router_id,
-        worker_b_id,
-        serde_json::json!({"task": "test"}),
-    );
+    let msg_for_b = command_message(router_id, worker_b_id, serde_json::json!({"task": "test"}));
 
     // Simulate routing decision based on target.
     let target_a = msg_for_a.target.unwrap();
@@ -266,7 +260,9 @@ async fn envelope_hop_tracking_and_loop_detection() {
 
     // Three hops should succeed.
     for _ in 0..3 {
-        envelope.record_hop(AgentId::new()).expect("hop should succeed");
+        envelope
+            .record_hop(AgentId::new())
+            .expect("hop should succeed");
     }
     assert_eq!(envelope.hops, 3);
     assert_eq!(envelope.route.len(), 3);
@@ -321,7 +317,10 @@ async fn handshake_and_reconnection_simulation() {
 
     // Re-handshake with same agent IDs.
     let re_handshake = heartbeat_message(client_id);
-    new_client.send(re_handshake).await.expect("send re-handshake");
+    new_client
+        .send(re_handshake)
+        .await
+        .expect("send re-handshake");
 
     let re_received = new_server
         .recv(Duration::from_secs(2))

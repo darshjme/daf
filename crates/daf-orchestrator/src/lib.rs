@@ -44,7 +44,9 @@ pub mod supervisor;
 // Re-export the primary public API at crate root.
 pub use handoff::{Handoff, HandoffManager, HandoffRecord};
 pub use metrics::{AgentMetrics, MetricsCollector, OrchestratorMetrics};
-pub use mission::{Mission, MissionId, MissionResult, MissionState, Phase, PhaseResult, RetryPolicy};
+pub use mission::{
+    Mission, MissionId, MissionResult, MissionState, Phase, PhaseResult, RetryPolicy,
+};
 pub use orchestrator::{Orchestrator, OrchestratorBuilder, OrchestratorConfig};
 pub use specialist::{SpecialistRole, SpecialistRouter};
 pub use sprint::{Sprint, SprintId, SprintPlanner, SprintProgress, WaveResult};

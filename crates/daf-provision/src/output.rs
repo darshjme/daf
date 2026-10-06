@@ -99,7 +99,7 @@ impl fmt::Display for Output {
 /// references.
 ///
 /// After applying a plan, the operator creates an `OutputCollector`, registers
-/// the outputs they care about, and then calls [`resolve`] to substitute
+/// the outputs they care about, and then calls [`resolve`](Self::resolve) to substitute
 /// `${resource.name.key}` references with actual values from the state.
 #[derive(Debug, Default)]
 pub struct OutputCollector {

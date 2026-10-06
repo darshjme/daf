@@ -13,6 +13,9 @@
 //! - Variable interpolation in task parameters
 //! - Idempotent task execution with change detection
 //!
+//! This is a standalone configuration simulation with local playbook types.
+//! It does not invoke daf-configure or configure remote agents.
+//!
 //! Run with:
 //!   cargo run -p daf-example-configuration
 
@@ -77,9 +80,7 @@ impl Inventory {
         self.hosts
             .iter()
             .filter(|h| {
-                h.name == pattern
-                    || h.groups.iter().any(|g| g == pattern)
-                    || h.kind == pattern
+                h.name == pattern || h.groups.iter().any(|g| g == pattern) || h.kind == pattern
             })
             .collect()
     }
@@ -246,9 +247,18 @@ impl PlaybookExecutor {
         // a real implementation that checks current state and applies changes.
         match task.module.as_str() {
             "capability" => {
-                let cap_name = resolved_params.get("name").map(|s| s.as_str()).unwrap_or("unknown");
-                let cap_version = resolved_params.get("version").map(|s| s.as_str()).unwrap_or("1.0.0");
-                let state = resolved_params.get("state").map(|s| s.as_str()).unwrap_or("present");
+                let cap_name = resolved_params
+                    .get("name")
+                    .map(|s| s.as_str())
+                    .unwrap_or("unknown");
+                let cap_version = resolved_params
+                    .get("version")
+                    .map(|s| s.as_str())
+                    .unwrap_or("1.0.0");
+                let state = resolved_params
+                    .get("state")
+                    .map(|s| s.as_str())
+                    .unwrap_or("present");
 
                 info!(
                     capability = cap_name,
@@ -264,26 +274,37 @@ impl PlaybookExecutor {
                 }
             }
             "resource_limit" => {
-                let resource = resolved_params.get("resource").map(|s| s.as_str()).unwrap_or("memory");
-                let limit = resolved_params.get("limit").map(|s| s.as_str()).unwrap_or("256");
+                let resource = resolved_params
+                    .get("resource")
+                    .map(|s| s.as_str())
+                    .unwrap_or("memory");
+                let limit = resolved_params
+                    .get("limit")
+                    .map(|s| s.as_str())
+                    .unwrap_or("256");
 
-                info!(
-                    resource,
-                    limit,
-                    "Setting resource limit"
-                );
+                info!(resource, limit, "Setting resource limit");
                 TaskResult::Changed
             }
             "metadata" => {
                 let key = resolved_params.get("key").map(|s| s.as_str()).unwrap_or("");
-                let value = resolved_params.get("value").map(|s| s.as_str()).unwrap_or("");
+                let value = resolved_params
+                    .get("value")
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
 
                 info!(key, value, "Setting metadata");
                 TaskResult::Changed
             }
             "health_check" => {
-                let endpoint = resolved_params.get("endpoint").map(|s| s.as_str()).unwrap_or("/health");
-                let interval = resolved_params.get("interval").map(|s| s.as_str()).unwrap_or("30s");
+                let endpoint = resolved_params
+                    .get("endpoint")
+                    .map(|s| s.as_str())
+                    .unwrap_or("/health");
+                let interval = resolved_params
+                    .get("interval")
+                    .map(|s| s.as_str())
+                    .unwrap_or("30s");
 
                 info!(endpoint, interval, "Configuring health check");
                 TaskResult::Changed
@@ -304,11 +325,7 @@ impl PlaybookExecutor {
     }
 
     /// Run a playbook against the inventory.
-    fn run(
-        &self,
-        playbook: &Playbook,
-        inventory: &Inventory,
-    ) -> PlaybookResult {
+    fn run(&self, playbook: &Playbook, inventory: &Inventory) -> PlaybookResult {
         info!(
             playbook = playbook.name,
             hosts = playbook.hosts,
@@ -457,8 +474,7 @@ impl fmt::Display for PlaybookResult {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -704,7 +720,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!(
             host = host.name,
             max_memory_mb = vars.get("max_memory_mb").map(|s| s.as_str()).unwrap_or("?"),
-            health_interval = vars.get("health_interval").map(|s| s.as_str()).unwrap_or("?"),
+            health_interval = vars
+                .get("health_interval")
+                .map(|s| s.as_str())
+                .unwrap_or("?"),
             enable_gpu = vars.get("enable_gpu").map(|s| s.as_str()).unwrap_or("?"),
             "Resolved variables"
         );

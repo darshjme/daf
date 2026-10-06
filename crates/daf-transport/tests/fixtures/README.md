@@ -1,0 +1,1 @@
+These certificates and the private key are public, disposable TLS test fixtures. Never use them for deployments. The CA private key is not retained. The leaf has localhost/127.0.0.1 SANs and client/server authentication usages; regenerate before October 2036.

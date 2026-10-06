@@ -24,3 +24,5 @@ uuid = { version = "1.16", features = ["v4", "v7"] }
 bytes = "1.10"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures-util = { version = "0.3", features = ["sink"] }

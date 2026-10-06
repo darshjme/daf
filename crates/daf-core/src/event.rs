@@ -201,8 +201,7 @@ impl EventFilter {
     pub fn matches(&self, event: &Event) -> bool {
         let kind_ok = self.kinds.is_empty() || self.kinds.contains(&event.kind);
         let source_ok = self.sources.is_empty() || self.sources.contains(&event.source);
-        let tag_ok = self.tags.is_empty()
-            || self.tags.iter().any(|t| event.tags.contains(t));
+        let tag_ok = self.tags.is_empty() || self.tags.iter().any(|t| event.tags.contains(t));
         kind_ok && source_ok && tag_ok
     }
 }
@@ -269,10 +268,7 @@ pub trait EventBus: Send + Sync {
 /// clusters, use a distributed implementation.
 pub struct InMemoryEventBus {
     subscribers: parking_lot::Mutex<
-        std::collections::HashMap<
-            SubscriptionId,
-            (EventFilter, tokio::sync::mpsc::Sender<Event>),
-        >,
+        std::collections::HashMap<SubscriptionId, (EventFilter, tokio::sync::mpsc::Sender<Event>)>,
     >,
 }
 
@@ -363,8 +359,7 @@ mod tests {
 
     #[test]
     fn event_display() {
-        let event = Event::new(EventKind::TaskFailed, test_agent())
-            .with_tag("retry");
+        let event = Event::new(EventKind::TaskFailed, test_agent()).with_tag("retry");
         let display = event.to_string();
         assert!(display.contains("task_failed"));
         assert!(display.contains("tags=[retry]"));
@@ -414,10 +409,8 @@ mod tests {
     fn filter_by_tag() {
         let filter = EventFilter::all().with_tag("critical");
 
-        let match_event = Event::new(EventKind::TaskFailed, test_agent())
-            .with_tag("critical");
-        let miss_event = Event::new(EventKind::TaskFailed, test_agent())
-            .with_tag("info");
+        let match_event = Event::new(EventKind::TaskFailed, test_agent()).with_tag("critical");
+        let miss_event = Event::new(EventKind::TaskFailed, test_agent()).with_tag("info");
 
         assert!(filter.matches(&match_event));
         assert!(!filter.matches(&miss_event));
@@ -494,10 +487,7 @@ mod tests {
     #[test]
     fn event_kind_display() {
         assert_eq!(EventKind::AgentSpawned.to_string(), "agent_spawned");
-        assert_eq!(
-            EventKind::Custom("x".into()).to_string(),
-            "custom:x"
-        );
+        assert_eq!(EventKind::Custom("x".into()).to_string(), "custom:x");
     }
 
     #[test]

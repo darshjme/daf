@@ -128,11 +128,7 @@ pub struct AgentTemplate {
 
 impl AgentTemplate {
     /// Create a new template.
-    pub fn new(
-        name: impl Into<String>,
-        description: impl Into<String>,
-        kind: AgentKind,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, description: impl Into<String>, kind: AgentKind) -> Self {
         Self {
             name: name.into(),
             description: description.into(),
@@ -291,36 +287,72 @@ pub fn builtin_templates() -> Vec<AgentTemplate> {
             "Reviews code for correctness, style, and security issues",
             AgentKind::Specialist,
         )
-        .with_capability(AgentCapability::new("code_review", "1.0.0", "Static code analysis"))
-        .with_capability(AgentCapability::new("security_scan", "1.0.0", "OWASP vulnerability detection")),
+        .with_capability(AgentCapability::new(
+            "code_review",
+            "1.0.0",
+            "Static code analysis",
+        ))
+        .with_capability(AgentCapability::new(
+            "security_scan",
+            "1.0.0",
+            "OWASP vulnerability detection",
+        )),
         AgentTemplate::new(
             "test-runner",
             "Executes test suites and reports results",
             AgentKind::Worker,
         )
-        .with_capability(AgentCapability::new("test_execution", "1.0.0", "Run test suites"))
-        .with_capability(AgentCapability::new("coverage_report", "1.0.0", "Generate coverage reports")),
+        .with_capability(AgentCapability::new(
+            "test_execution",
+            "1.0.0",
+            "Run test suites",
+        ))
+        .with_capability(AgentCapability::new(
+            "coverage_report",
+            "1.0.0",
+            "Generate coverage reports",
+        )),
         AgentTemplate::new(
             "deployer",
             "Handles deployment to staging and production environments",
             AgentKind::Specialist,
         )
         .with_capability(AgentCapability::new("deploy", "1.0.0", "Deploy artifacts"))
-        .with_capability(AgentCapability::new("rollback", "1.0.0", "Rollback to previous version")),
+        .with_capability(AgentCapability::new(
+            "rollback",
+            "1.0.0",
+            "Rollback to previous version",
+        )),
         AgentTemplate::new(
             "health-monitor",
             "Watches cluster health and emits alerts",
             AgentKind::Monitor,
         )
-        .with_capability(AgentCapability::new("health_check", "1.0.0", "Periodic health probes"))
-        .with_capability(AgentCapability::new("alerting", "1.0.0", "Send alerts on degradation")),
+        .with_capability(AgentCapability::new(
+            "health_check",
+            "1.0.0",
+            "Periodic health probes",
+        ))
+        .with_capability(AgentCapability::new(
+            "alerting",
+            "1.0.0",
+            "Send alerts on degradation",
+        )),
         AgentTemplate::new(
             "orchestrator",
             "Top-level coordinator that decomposes goals into tasks",
             AgentKind::Orchestrator,
         )
-        .with_capability(AgentCapability::new("task_decomposition", "1.0.0", "Break goals into subtasks"))
-        .with_capability(AgentCapability::new("delegation", "1.0.0", "Assign tasks to specialists")),
+        .with_capability(AgentCapability::new(
+            "task_decomposition",
+            "1.0.0",
+            "Break goals into subtasks",
+        ))
+        .with_capability(AgentCapability::new(
+            "delegation",
+            "1.0.0",
+            "Assign tasks to specialists",
+        )),
     ]
 }
 
@@ -333,8 +365,11 @@ mod tests {
     use super::*;
 
     fn test_manifest(name: &str, kind: AgentKind) -> AgentManifest {
-        AgentManifest::new(kind, name)
-            .with_capability(AgentCapability::new("test_cap", "1.0.0", "Test capability"))
+        AgentManifest::new(kind, name).with_capability(AgentCapability::new(
+            "test_cap",
+            "1.0.0",
+            "Test capability",
+        ))
     }
 
     #[test]
@@ -374,7 +409,10 @@ mod tests {
     fn catalog_list_with_filter() {
         let mut catalog = Catalog::new();
         catalog.upsert(CatalogEntry::new(test_manifest("w1", AgentKind::Worker)));
-        catalog.upsert(CatalogEntry::new(test_manifest("s1", AgentKind::Specialist)));
+        catalog.upsert(CatalogEntry::new(test_manifest(
+            "s1",
+            AgentKind::Specialist,
+        )));
         catalog.upsert(CatalogEntry::new(test_manifest("w2", AgentKind::Worker)));
 
         let workers = catalog.list(Some(AgentKind::Worker));
@@ -387,8 +425,15 @@ mod tests {
     #[test]
     fn catalog_json_roundtrip() {
         let mut catalog = Catalog::new();
-        catalog.upsert(CatalogEntry::new(test_manifest("agent-a", AgentKind::Worker)));
-        catalog.add_template(AgentTemplate::new("tmpl-1", "Test template", AgentKind::Worker));
+        catalog.upsert(CatalogEntry::new(test_manifest(
+            "agent-a",
+            AgentKind::Worker,
+        )));
+        catalog.add_template(AgentTemplate::new(
+            "tmpl-1",
+            "Test template",
+            AgentKind::Worker,
+        ));
 
         let json = catalog.export_json().unwrap();
         let restored = Catalog::import_json(&json).unwrap();
@@ -401,10 +446,16 @@ mod tests {
     #[test]
     fn catalog_merge() {
         let mut a = Catalog::new();
-        a.upsert(CatalogEntry::new(test_manifest("agent-a", AgentKind::Worker)));
+        a.upsert(CatalogEntry::new(test_manifest(
+            "agent-a",
+            AgentKind::Worker,
+        )));
 
         let mut b = Catalog::new();
-        b.upsert(CatalogEntry::new(test_manifest("agent-b", AgentKind::Specialist)));
+        b.upsert(CatalogEntry::new(test_manifest(
+            "agent-b",
+            AgentKind::Specialist,
+        )));
 
         a.merge(b);
         assert_eq!(a.len(), 2);

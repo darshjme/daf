@@ -18,7 +18,9 @@
 use bytes::BytesMut;
 use tokio_util::codec::{Decoder, Encoder};
 
-use crate::protocol::{Frame, FrameDecodeError, HEADER_SIZE, MAGIC_BYTES, MAX_PAYLOAD_SIZE};
+use crate::protocol::{
+    Frame, FrameDecodeError, HEADER_SIZE, MAGIC_BYTES, MAX_PAYLOAD_SIZE, ProtocolVersion,
+};
 
 // ---------------------------------------------------------------------------
 // DdalCodec
@@ -117,9 +119,25 @@ impl Decoder for DdalCodec {
             return Ok(None);
         }
 
+        let version = ProtocolVersion {
+            major: src[4],
+            minor: src[5],
+            patch: src[6],
+        };
+        if !ProtocolVersion::CURRENT.is_compatible_with(&version) {
+            return Err(FrameDecodeError::UnsupportedVersion(version).into());
+        }
+
         // Step 3: Peek at the payload length (offset 12..16) to determine
         // total frame size.
         let payload_len = u32::from_be_bytes([src[12], src[13], src[14], src[15]]);
+        if payload_len > MAX_PAYLOAD_SIZE {
+            return Err(FrameDecodeError::PayloadTooLarge {
+                size: payload_len,
+                max: MAX_PAYLOAD_SIZE,
+            }
+            .into());
+        }
         let total = HEADER_SIZE + payload_len as usize;
 
         if total > self.max_frame_size {
@@ -153,7 +171,26 @@ impl Encoder<Frame> for DdalCodec {
     type Error = DdalCodecError;
 
     fn encode(&mut self, frame: Frame, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        let total = HEADER_SIZE + frame.payload_len as usize;
+        // Frame fields are public; never trust a forged length or stale checksum.
+        let total = HEADER_SIZE + frame.payload.len();
+        if frame.payload.len() > MAX_PAYLOAD_SIZE as usize || total > self.max_frame_size {
+            return Err(DdalCodecError::FrameTooLarge {
+                size: total,
+                max: self
+                    .max_frame_size
+                    .min(HEADER_SIZE + MAX_PAYLOAD_SIZE as usize),
+            });
+        }
+        if frame.payload.len() != frame.payload_len as usize {
+            return Err(DdalCodecError::InvalidFrame(
+                "payload length does not match payload",
+            ));
+        }
+        if !frame.verify_checksum() {
+            return Err(DdalCodecError::InvalidFrame(
+                "checksum does not match frame",
+            ));
+        }
         if total > self.max_frame_size {
             return Err(DdalCodecError::FrameTooLarge {
                 size: total,
@@ -174,6 +211,8 @@ impl Encoder<Frame> for DdalCodec {
 /// Errors produced by [`DdalCodec`] during encoding or decoding.
 #[derive(Debug, thiserror::Error)]
 pub enum DdalCodecError {
+    #[error("invalid frame: {0}")]
+    InvalidFrame(&'static str),
     #[error("frame too large: {size} bytes exceeds codec maximum of {max}")]
     FrameTooLarge { size: usize, max: usize },
 
@@ -196,6 +235,30 @@ mod tests {
 
     fn codec() -> DdalCodec {
         DdalCodec::new()
+    }
+
+    #[test]
+    fn forged_length_cannot_bypass_encode_limit() {
+        let mut frame = Frame::data(1, Bytes::from(vec![0; 100]));
+        frame.payload_len = 0;
+        let mut dst = BytesMut::new();
+        assert!(
+            DdalCodec::with_max_frame_size(HEADER_SIZE + 10)
+                .encode(frame, &mut dst)
+                .is_err()
+        );
+        assert!(dst.is_empty());
+    }
+
+    #[test]
+    fn stale_checksum_cannot_be_encoded() {
+        let mut frame = Frame::data(1, Bytes::from_static(b"one"));
+        frame.payload = Bytes::from_static(b"two");
+        assert!(
+            DdalCodec::new()
+                .encode(frame, &mut BytesMut::new())
+                .is_err()
+        );
     }
 
     #[test]

@@ -25,15 +25,15 @@ pub use daf_core::agent::{
 };
 pub use daf_core::error::{DafError, DafResult, ErrorContext};
 pub use daf_core::message::{Envelope, Message, MessageId, MessageKind, Priority};
-pub use daf_core::task::{TaskHandle, TaskId, TaskPriority, TaskResult, TaskSpec, TaskState};
 pub use daf_core::resource::{ResourceGuard, ResourceKind, ResourceLimit, ResourcePool};
+pub use daf_core::task::{TaskHandle, TaskId, TaskPriority, TaskResult, TaskSpec, TaskState};
 
 // ---------------------------------------------------------------------------
 // DDAL types
 // ---------------------------------------------------------------------------
 
-pub use daf_ddal::protocol::{Frame, FrameFlags, FrameType, ProtocolVersion};
 pub use daf_ddal::codec::DdalCodec;
+pub use daf_ddal::protocol::{Frame, FrameFlags, FrameType, ProtocolVersion};
 
 // ---------------------------------------------------------------------------
 // SDK types
@@ -66,15 +66,12 @@ pub use crate::middleware::{
 pub use crate::task_types::{Event, SdkTaskResult, SdkTaskSpec};
 
 // Templates
-pub use crate::template::{
-    MonitorTemplate, PipelineTemplate, RouterTemplate, WorkerTemplate,
-};
+pub use crate::template::{MonitorTemplate, PipelineTemplate, RouterTemplate, WorkerTemplate};
 
 // Testing (always available, not gated behind `#[cfg(test)]` so integration
 // tests in downstream crates can use these utilities).
 pub use crate::testing::{
-    MockAgent, TestContext, TestHarness,
-    test_agent_context, test_message, test_routed_message,
+    MockAgent, TestContext, TestHarness, test_agent_context, test_message, test_routed_message,
 };
 
 // ---------------------------------------------------------------------------
@@ -82,7 +79,7 @@ pub use crate::testing::{
 // ---------------------------------------------------------------------------
 
 pub use async_trait::async_trait;
-pub use serde::{Deserialize, Serialize};
-pub use serde_json::{self, json, Value};
-pub use uuid::Uuid;
 pub use chrono::{DateTime, Utc};
+pub use serde::{Deserialize, Serialize};
+pub use serde_json::{self, Value, json};
+pub use uuid::Uuid;

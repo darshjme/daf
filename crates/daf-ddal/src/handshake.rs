@@ -8,8 +8,8 @@
 //! ## Wire format
 //!
 //! Handshake messages are serialized with [`bincode`] for compact binary
-//! encoding. They ride inside a [`Frame`](crate::protocol::Frame) of type
-//! [`Handshake`](crate::protocol::FrameType::Handshake).
+//! encoding, preceded by a four-byte big-endian payload length. They are
+//! exchanged before framed application traffic.
 //!
 //! ## Flow
 //!
@@ -24,7 +24,6 @@
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use daf_core::{DafError, DafResult};
@@ -37,7 +36,7 @@ use daf_core::{DafError, DafResult};
 ///
 /// The server uses this information to decide whether to accept the
 /// connection, assign a channel, and configure protocol features.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct HandshakeRequest {
     /// Protocol version the client speaks, as `(major, minor, patch)`.
     pub protocol_version: (u16, u16, u16),
@@ -50,9 +49,24 @@ pub struct HandshakeRequest {
     pub capabilities: Vec<String>,
     /// Optional bearer token for authentication.
     ///
-    /// When present, the server validates this against its auth backend
-    /// before accepting the connection.
+    /// The application must validate this against its authentication backend
+    /// before accepting the connection. Parsing a request does not authorize it.
     pub auth_token: Option<String>,
+}
+
+impl std::fmt::Debug for HandshakeRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HandshakeRequest")
+            .field("protocol_version", &self.protocol_version)
+            .field("agent_name", &self.agent_name)
+            .field("agent_kind", &self.agent_kind)
+            .field("capabilities", &self.capabilities)
+            .field(
+                "auth_token",
+                &self.auth_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 impl HandshakeRequest {
@@ -179,31 +193,31 @@ where
     R: AsyncReadExt + Unpin,
 {
     let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await.map_err(|e| {
-        DafError::TransportError {
+    stream
+        .read_exact(&mut len_buf)
+        .await
+        .map_err(|e| DafError::TransportError {
             endpoint: None,
             message: format!("handshake read length: {e}"),
             retryable: false,
-        }
-    })?;
+        })?;
 
     let len = u32::from_be_bytes(len_buf) as usize;
     if len > MAX_HANDSHAKE_SIZE {
         return Err(DafError::ProtocolError {
-            message: format!(
-                "handshake message too large: {len} bytes (max {MAX_HANDSHAKE_SIZE})",
-            ),
+            message: format!("handshake message too large: {len} bytes (max {MAX_HANDSHAKE_SIZE})",),
         });
     }
 
     let mut payload = vec![0u8; len];
-    stream.read_exact(&mut payload).await.map_err(|e| {
-        DafError::TransportError {
+    stream
+        .read_exact(&mut payload)
+        .await
+        .map_err(|e| DafError::TransportError {
             endpoint: None,
             message: format!("handshake read payload: {e}"),
             retryable: false,
-        }
-    })?;
+        })?;
 
     bincode::deserialize(&payload)
         .map_err(|e| DafError::SerializationError(format!("bincode decode: {e}")))
@@ -232,19 +246,18 @@ where
 {
     // Encode and send the request.
     let encoded = encode_handshake(request)?;
-    stream.write_all(&encoded).await.map_err(|e| {
-        DafError::TransportError {
+    stream
+        .write_all(&encoded)
+        .await
+        .map_err(|e| DafError::TransportError {
             endpoint: None,
             message: format!("handshake write: {e}"),
             retryable: true,
-        }
-    })?;
-    stream.flush().await.map_err(|e| {
-        DafError::TransportError {
-            endpoint: None,
-            message: format!("handshake flush: {e}"),
-            retryable: true,
-        }
+        })?;
+    stream.flush().await.map_err(|e| DafError::TransportError {
+        endpoint: None,
+        message: format!("handshake flush: {e}"),
+        retryable: true,
     })?;
 
     // Read the response.
@@ -268,56 +281,14 @@ where
 
 /// Perform the server side of the DDAL handshake.
 ///
-/// Reads a [`HandshakeRequest`] from `stream` and returns it together with
-/// a [`oneshot::Sender`] that the caller uses to send back the
-/// [`HandshakeResponse`] once it has made an accept/reject decision.
-///
-/// This two-phase design lets the server inspect the request, run auth
-/// checks, and allocate resources before committing to a response.
-///
-/// # Errors
-///
-/// Returns `Err` on I/O failure or deserialization errors.
-pub async fn perform_handshake_server<S>(
-    stream: &mut S,
-) -> DafResult<(HandshakeRequest, oneshot::Sender<HandshakeResponse>)>
+/// Reads and returns the request for caller-controlled version and authentication
+/// validation. Send the decision with [`complete_handshake_server`].
+/// No background response task is implied: the caller owns the stream.
+pub async fn perform_handshake_server<S>(stream: &mut S) -> DafResult<HandshakeRequest>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
-    // Read the client's request.
-    let request: HandshakeRequest = decode_handshake(stream).await?;
-
-    // Create a oneshot channel for the response.
-    let (tx, rx) = oneshot::channel::<HandshakeResponse>();
-
-    // Spawn the response-sending task. When the caller sends through `tx`,
-    // we serialize and write the response.
-    let encoded_future = async move {
-        match rx.await {
-            Ok(response) => {
-                let encoded = encode_handshake(&response)?;
-                // We cannot write here because we don't own the stream.
-                // Instead we return the bytes.
-                Ok::<Vec<u8>, DafError>(encoded)
-            }
-            Err(_) => Err(DafError::TransportError {
-                endpoint: None,
-                message: "handshake response sender dropped".into(),
-                retryable: false,
-            }),
-        }
-    };
-
-    // We need to actually send the response bytes. To keep the API simple,
-    // we use a different approach: the caller sends the response through
-    // the oneshot, then calls `send_handshake_response` with the stream.
-    //
-    // But the cleaner pattern is to give the stream back. Let's use the
-    // simpler approach: return (request, sender) and provide a separate
-    // function to complete the handshake.
-    drop(encoded_future); // not used in this approach
-
-    Ok((request, tx))
+    decode_handshake(stream).await
 }
 
 /// Complete the server-side handshake by sending a response.
@@ -332,19 +303,18 @@ where
     S: AsyncWriteExt + Unpin,
 {
     let encoded = encode_handshake(response)?;
-    stream.write_all(&encoded).await.map_err(|e| {
-        DafError::TransportError {
+    stream
+        .write_all(&encoded)
+        .await
+        .map_err(|e| DafError::TransportError {
             endpoint: None,
             message: format!("handshake response write: {e}"),
             retryable: false,
-        }
-    })?;
-    stream.flush().await.map_err(|e| {
-        DafError::TransportError {
-            endpoint: None,
-            message: format!("handshake response flush: {e}"),
-            retryable: false,
-        }
+        })?;
+    stream.flush().await.map_err(|e| DafError::TransportError {
+        endpoint: None,
+        message: format!("handshake response flush: {e}"),
+        retryable: false,
     })?;
     Ok(())
 }
@@ -357,6 +327,12 @@ where
 mod tests {
     use super::*;
     use tokio::io::duplex;
+
+    #[test]
+    fn debug_does_not_expose_auth_token() {
+        let request = HandshakeRequest::new("agent", "worker").with_auth_token("sensitive-value");
+        assert!(!format!("{request:?}").contains("sensitive-value"));
+    }
 
     #[test]
     fn handshake_request_builder() {
@@ -393,14 +369,13 @@ mod tests {
 
     #[test]
     fn encode_decode_round_trip_request() {
-        let req = HandshakeRequest::new("test-agent", "worker")
-            .with_capabilities(vec!["cap1".into()]);
+        let req =
+            HandshakeRequest::new("test-agent", "worker").with_capabilities(vec!["cap1".into()]);
 
         let encoded = encode_handshake(&req).unwrap();
         // First 4 bytes are the length prefix.
         let len = u32::from_be_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]) as usize;
-        let decoded: HandshakeRequest =
-            bincode::deserialize(&encoded[4..4 + len]).unwrap();
+        let decoded: HandshakeRequest = bincode::deserialize(&encoded[4..4 + len]).unwrap();
 
         assert_eq!(decoded.agent_name, "test-agent");
         assert_eq!(decoded.capabilities, vec!["cap1"]);
@@ -408,13 +383,11 @@ mod tests {
 
     #[test]
     fn encode_decode_round_trip_response() {
-        let resp = HandshakeResponse::accept(Uuid::now_v7(), 10)
-            .with_server_version(0, 2, 0);
+        let resp = HandshakeResponse::accept(Uuid::now_v7(), 10).with_server_version(0, 2, 0);
 
         let encoded = encode_handshake(&resp).unwrap();
         let len = u32::from_be_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]) as usize;
-        let decoded: HandshakeResponse =
-            bincode::deserialize(&encoded[4..4 + len]).unwrap();
+        let decoded: HandshakeResponse = bincode::deserialize(&encoded[4..4 + len]).unwrap();
 
         assert!(decoded.accepted);
         assert_eq!(decoded.assigned_channel_id, 10);
@@ -429,16 +402,17 @@ mod tests {
         let session_id = Uuid::now_v7();
 
         // Run client and server concurrently.
-        let client_handle = tokio::spawn(async move {
-            perform_handshake_client(&mut client, &request).await
-        });
+        let client_handle =
+            tokio::spawn(async move { perform_handshake_client(&mut client, &request).await });
 
         let server_handle = tokio::spawn(async move {
-            let (req, _tx) = perform_handshake_server(&mut server).await.unwrap();
+            let req = perform_handshake_server(&mut server).await.unwrap();
             assert_eq!(req.agent_name, "agent-a");
 
             let response = HandshakeResponse::accept(session_id, 1);
-            complete_handshake_server(&mut server, &response).await.unwrap();
+            complete_handshake_server(&mut server, &response)
+                .await
+                .unwrap();
         });
 
         let (client_result, _) = tokio::join!(client_handle, server_handle);
@@ -454,16 +428,17 @@ mod tests {
 
         let request = HandshakeRequest::new("bad-agent", "unknown");
 
-        let client_handle = tokio::spawn(async move {
-            perform_handshake_client(&mut client, &request).await
-        });
+        let client_handle =
+            tokio::spawn(async move { perform_handshake_client(&mut client, &request).await });
 
         let server_handle = tokio::spawn(async move {
-            let (req, _tx) = perform_handshake_server(&mut server).await.unwrap();
+            let req = perform_handshake_server(&mut server).await.unwrap();
             assert_eq!(req.agent_name, "bad-agent");
 
             let response = HandshakeResponse::reject("unsupported agent kind");
-            complete_handshake_server(&mut server, &response).await.unwrap();
+            complete_handshake_server(&mut server, &response)
+                .await
+                .unwrap();
         });
 
         let (client_result, _) = tokio::join!(client_handle, server_handle);
@@ -474,8 +449,8 @@ mod tests {
 
     #[test]
     fn serde_json_round_trip_request() {
-        let req = HandshakeRequest::new("agent", "orchestrator")
-            .with_capabilities(vec!["plan".into()]);
+        let req =
+            HandshakeRequest::new("agent", "orchestrator").with_capabilities(vec!["plan".into()]);
         let json = serde_json::to_string(&req).unwrap();
         let back: HandshakeRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.agent_name, "agent");

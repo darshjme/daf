@@ -17,6 +17,10 @@ members = [
     "crates/daf-runtime",
     "benchmarks",
     "tests/integration",
+    "examples/basic-agent",
+    "examples/multi-agent",
+    "examples/infrastructure",
+    "examples/configuration",
 ]
 
 [workspace.package]

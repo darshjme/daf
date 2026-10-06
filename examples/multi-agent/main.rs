@@ -15,6 +15,9 @@
 //! - Conversation/context tracking across handoffs
 //! - Coordinated shutdown
 //!
+//! Research and analysis outputs are deterministic fixtures; no model is called.
+//! Transport is local MPSC, with no network or DDAL framing.
+//!
 //! Run with:
 //!   cargo run -p daf-example-multi-agent
 
@@ -22,17 +25,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tracing::{info, warn};
 
 use daf_core::agent::{
-    Agent, AgentCapability, AgentContext, AgentId, AgentKind, AgentManifest, AgentStatus,
-    ResourceLimits,
+    Agent, AgentCapability, AgentContext, AgentKind, AgentManifest, AgentStatus,
 };
 use daf_core::error::{DafError, DafResult};
-use daf_core::message::{Message, MessageKind};
+use daf_core::message::Message;
 
 // ---------------------------------------------------------------------------
 // Pipeline data types — shared between all agents
@@ -89,7 +90,7 @@ struct ResearcherAgent {
     manifest: AgentManifest,
     status: Arc<Mutex<AgentStatus>>,
     /// Channel to send findings downstream to the Analyzer.
-    output_tx: mpsc::Sender<ResearchFindings>,
+    output_tx: Mutex<Option<mpsc::Sender<ResearchFindings>>>,
     /// Channel to receive topics to research.
     input_rx: Arc<Mutex<mpsc::Receiver<ResearchTopic>>>,
 }
@@ -110,7 +111,7 @@ impl ResearcherAgent {
         Self {
             manifest,
             status: Arc::new(Mutex::new(AgentStatus::Spawning)),
-            output_tx,
+            output_tx: Mutex::new(Some(output_tx)),
             input_rx: Arc::new(Mutex::new(input_rx)),
         }
     }
@@ -124,9 +125,17 @@ impl Agent for ResearcherAgent {
         Ok(())
     }
 
-    async fn execute(&self, ctx: &AgentContext) -> DafResult<serde_json::Value> {
+    async fn execute(&self, _ctx: &AgentContext) -> DafResult<serde_json::Value> {
         *self.status.lock().await = AgentStatus::Executing;
         let mut processed = 0u32;
+        // Execution owns the sender so completion closes the downstream channel,
+        // even though main retains the agent for shutdown/status reporting.
+        let output_tx = self
+            .output_tx
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| DafError::Internal("pipeline stage already executed".into()))?;
 
         // Pull topics from the input channel until it closes
         loop {
@@ -154,16 +163,16 @@ impl Agent for ResearcherAgent {
                 conversation_id: topic.conversation_id.clone(),
                 topic: topic.topic.clone(),
                 findings: vec![
-                    format!("{} has seen 40% growth in the last quarter", topic.topic),
+                    format!("FIXTURE: {} has simulated growth of 40%", topic.topic),
                     format!("Key competitors in {} space: 3 major players", topic.topic),
-                    format!("Market size for {} estimated at $2.1B", topic.topic),
+                    format!("FIXTURE: Market size for {} set to $2.1B", topic.topic),
                     format!("Regulatory landscape for {} is evolving", topic.topic),
                 ],
                 researched_by: self.manifest.id.to_string(),
             };
 
-            // Hand off to the Analyzer via the DDAL channel
-            if self.output_tx.send(findings).await.is_err() {
+            // Hand off to the Analyzer via the local MPSC channel
+            if output_tx.send(findings).await.is_err() {
                 warn!("Researcher: downstream channel closed unexpectedly");
                 break;
             }
@@ -199,7 +208,10 @@ impl Agent for ResearcherAgent {
     }
 
     fn status(&self) -> AgentStatus {
-        self.status.try_lock().map(|s| *s).unwrap_or(AgentStatus::Executing)
+        self.status
+            .try_lock()
+            .map(|s| *s)
+            .unwrap_or(AgentStatus::Executing)
     }
 
     fn manifest(&self) -> &AgentManifest {
@@ -215,14 +227,11 @@ struct AnalyzerAgent {
     manifest: AgentManifest,
     status: Arc<Mutex<AgentStatus>>,
     input_rx: Arc<Mutex<mpsc::Receiver<ResearchFindings>>>,
-    output_tx: mpsc::Sender<Analysis>,
+    output_tx: Mutex<Option<mpsc::Sender<Analysis>>>,
 }
 
 impl AnalyzerAgent {
-    fn new(
-        input_rx: mpsc::Receiver<ResearchFindings>,
-        output_tx: mpsc::Sender<Analysis>,
-    ) -> Self {
+    fn new(input_rx: mpsc::Receiver<ResearchFindings>, output_tx: mpsc::Sender<Analysis>) -> Self {
         let manifest = AgentManifest::new(AgentKind::Specialist, "analyzer")
             .with_capability(AgentCapability::new(
                 "analysis",
@@ -240,7 +249,7 @@ impl AnalyzerAgent {
             manifest,
             status: Arc::new(Mutex::new(AgentStatus::Spawning)),
             input_rx: Arc::new(Mutex::new(input_rx)),
-            output_tx,
+            output_tx: Mutex::new(Some(output_tx)),
         }
     }
 }
@@ -253,9 +262,17 @@ impl Agent for AnalyzerAgent {
         Ok(())
     }
 
-    async fn execute(&self, ctx: &AgentContext) -> DafResult<serde_json::Value> {
+    async fn execute(&self, _ctx: &AgentContext) -> DafResult<serde_json::Value> {
         *self.status.lock().await = AgentStatus::Executing;
         let mut processed = 0u32;
+        // Execution owns the sender so completion closes the downstream channel,
+        // even though main retains the agent for shutdown/status reporting.
+        let output_tx = self
+            .output_tx
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| DafError::Internal("pipeline stage already executed".into()))?;
 
         loop {
             let findings = {
@@ -278,7 +295,11 @@ impl Agent for AnalyzerAgent {
             tokio::time::sleep(Duration::from_millis(150)).await;
 
             // Determine risk level based on findings content
-            let risk_level = if findings.findings.iter().any(|f| f.contains("regulatory")) {
+            let risk_level = if findings
+                .findings
+                .iter()
+                .any(|f| f.to_lowercase().contains("regulatory"))
+            {
                 "medium"
             } else {
                 "low"
@@ -290,14 +311,24 @@ impl Agent for AnalyzerAgent {
                 findings_count: findings.findings.len(),
                 insights: vec![
                     format!("Growth trajectory for {} is positive", findings.topic),
-                    format!("Competitive landscape is {}", if findings.findings.len() > 3 { "crowded" } else { "open" }),
-                    format!("Market opportunity score: {}/10", findings.findings.len() * 2),
+                    format!(
+                        "Competitive landscape is {}",
+                        if findings.findings.len() > 3 {
+                            "crowded"
+                        } else {
+                            "open"
+                        }
+                    ),
+                    format!(
+                        "Market opportunity score: {}/10",
+                        findings.findings.len() * 2
+                    ),
                 ],
                 risk_level: risk_level.to_string(),
                 analyzed_by: self.manifest.id.to_string(),
             };
 
-            if self.output_tx.send(analysis).await.is_err() {
+            if output_tx.send(analysis).await.is_err() {
                 warn!("Analyzer: downstream channel closed");
                 break;
             }
@@ -305,8 +336,7 @@ impl Agent for AnalyzerAgent {
             processed += 1;
             info!(
                 conversation_id = findings.conversation_id,
-                risk_level,
-                "Analyzer: analysis sent downstream"
+                risk_level, "Analyzer: analysis sent downstream"
             );
         }
 
@@ -334,7 +364,10 @@ impl Agent for AnalyzerAgent {
     }
 
     fn status(&self) -> AgentStatus {
-        self.status.try_lock().map(|s| *s).unwrap_or(AgentStatus::Executing)
+        self.status
+            .try_lock()
+            .map(|s| *s)
+            .unwrap_or(AgentStatus::Executing)
     }
 
     fn manifest(&self) -> &AgentManifest {
@@ -381,7 +414,7 @@ impl Agent for ReporterAgent {
         Ok(())
     }
 
-    async fn execute(&self, ctx: &AgentContext) -> DafResult<serde_json::Value> {
+    async fn execute(&self, _ctx: &AgentContext) -> DafResult<serde_json::Value> {
         *self.status.lock().await = AgentStatus::Executing;
 
         loop {
@@ -406,10 +439,10 @@ impl Agent for ReporterAgent {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             let recommendation = match analysis.risk_level.as_str() {
-                "low" => "PROCEED — favorable conditions for investment",
-                "medium" => "PROCEED WITH CAUTION — monitor regulatory changes",
-                "high" => "HOLD — wait for market stabilization",
-                _ => "INSUFFICIENT DATA — requires further research",
+                "low" => "FIXTURE: PROCEED — favorable conditions for investment",
+                "medium" => "FIXTURE: PROCEED WITH CAUTION — monitor regulatory changes",
+                "high" => "FIXTURE: HOLD — wait for market stabilization",
+                _ => "FIXTURE: INSUFFICIENT DATA — requires further research",
             };
 
             let report = Report {
@@ -464,7 +497,10 @@ impl Agent for ReporterAgent {
     }
 
     fn status(&self) -> AgentStatus {
-        self.status.try_lock().map(|s| *s).unwrap_or(AgentStatus::Executing)
+        self.status
+            .try_lock()
+            .map(|s| *s)
+            .unwrap_or(AgentStatus::Executing)
     }
 
     fn manifest(&self) -> &AgentManifest {
@@ -480,8 +516,7 @@ impl Agent for ReporterAgent {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with_target(true)
         .init();
@@ -490,7 +525,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Pipeline: Researcher --> Analyzer --> Reporter");
 
     // -----------------------------------------------------------------------
-    // 1. Set up DDAL channels between pipeline stages.
+    // 1. Set up local MPSC channels between pipeline stages.
     //
     // In production, these would be DDAL binary socket channels managed by
     // the transport layer. Here we use tokio MPSC channels to demonstrate
@@ -548,21 +583,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let researcher_clone = researcher.clone();
     let researcher_ctx_clone = researcher_ctx.clone();
-    let researcher_handle = tokio::spawn(async move {
-        researcher_clone.execute(&researcher_ctx_clone).await
-    });
+    let researcher_handle =
+        tokio::spawn(async move { researcher_clone.execute(&researcher_ctx_clone).await });
 
     let analyzer_clone = analyzer.clone();
     let analyzer_ctx_clone = analyzer_ctx.clone();
-    let analyzer_handle = tokio::spawn(async move {
-        analyzer_clone.execute(&analyzer_ctx_clone).await
-    });
+    let analyzer_handle =
+        tokio::spawn(async move { analyzer_clone.execute(&analyzer_ctx_clone).await });
 
     let reporter_clone = reporter.clone();
     let reporter_ctx_clone = reporter_ctx.clone();
-    let reporter_handle = tokio::spawn(async move {
-        reporter_clone.execute(&reporter_ctx_clone).await
-    });
+    let reporter_handle =
+        tokio::spawn(async move { reporter_clone.execute(&reporter_ctx_clone).await });
 
     // -----------------------------------------------------------------------
     // 6. Feed topics into the pipeline.

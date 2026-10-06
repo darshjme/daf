@@ -141,12 +141,7 @@ impl WorkingMemory {
     /// Search working memory by content substring.
     pub fn search_content(&self, query: &str) -> Vec<Memory> {
         let query_lower = query.to_lowercase();
-        self.search(|m| {
-            m.content
-                .to_string()
-                .to_lowercase()
-                .contains(&query_lower)
-        })
+        self.search(|m| m.content.to_string().to_lowercase().contains(&query_lower))
     }
 
     /// Search working memory by tag.
@@ -410,14 +405,8 @@ mod tests {
     #[test]
     fn working_memory_search_tag() {
         let wm = WorkingMemory::new(10);
-        wm.add(
-            Memory::new(MemoryKind::Working, json!("a"))
-                .with_tags(vec!["lang".into()]),
-        );
-        wm.add(
-            Memory::new(MemoryKind::Working, json!("b"))
-                .with_tags(vec!["deploy".into()]),
-        );
+        wm.add(Memory::new(MemoryKind::Working, json!("a")).with_tags(vec!["lang".into()]));
+        wm.add(Memory::new(MemoryKind::Working, json!("b")).with_tags(vec!["deploy".into()]));
 
         let results = wm.search_tag("lang");
         assert_eq!(results.len(), 1);
@@ -493,7 +482,10 @@ mod tests {
     async fn context_manager_full_lifecycle() {
         let store = Arc::new(InMemoryStore::new());
         store
-            .store(&Memory::new(MemoryKind::Semantic, json!("background knowledge")))
+            .store(&Memory::new(
+                MemoryKind::Semantic,
+                json!("background knowledge"),
+            ))
             .await
             .unwrap();
 

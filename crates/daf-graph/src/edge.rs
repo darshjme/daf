@@ -46,9 +46,10 @@ impl fmt::Display for EdgeKind {
 
 /// Condition that determines whether an edge should fire after the source
 /// node reaches a terminal state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EdgeCondition {
     /// Always fire regardless of source outcome.
+    #[default]
     Always,
     /// Only fire if the source node succeeded.
     OnSuccess,
@@ -57,12 +58,6 @@ pub enum EdgeCondition {
     /// Fire if the source node's output contains the specified key.
     /// Used for routing based on output content (e.g., branch on classification).
     OnOutput(String),
-}
-
-impl Default for EdgeCondition {
-    fn default() -> Self {
-        Self::Always
-    }
 }
 
 impl fmt::Display for EdgeCondition {
@@ -93,7 +88,7 @@ pub struct Edge {
     /// What kind of relationship this edge represents.
     pub kind: EdgeKind,
     /// Condition that must be met for this edge to fire.
-    /// `None` is treated as `EdgeCondition::Always`.
+    /// `None` requires success for DependsOn/DataFlow, and terminal completion otherwise.
     pub condition: Option<EdgeCondition>,
     /// Priority weight — higher values indicate higher priority edges
     /// when multiple edges compete for scheduling order.
@@ -101,7 +96,7 @@ pub struct Edge {
 }
 
 impl Edge {
-    /// Create a new edge with default condition (Always) and weight (0).
+    /// Create a new edge with the kind-specific default condition and weight (0).
     pub fn new(source: NodeId, target: NodeId, kind: EdgeKind) -> Self {
         Self {
             source,
@@ -124,9 +119,12 @@ impl Edge {
         self
     }
 
-    /// Returns the effective condition, defaulting to `Always` if none set.
+    /// Returns the explicit condition or the kind-specific default.
     pub fn effective_condition(&self) -> &EdgeCondition {
-        self.condition.as_ref().unwrap_or(&EdgeCondition::Always)
+        self.condition.as_ref().unwrap_or(match self.kind {
+            EdgeKind::DependsOn | EdgeKind::DataFlow => &EdgeCondition::OnSuccess,
+            _ => &EdgeCondition::Always,
+        })
     }
 }
 
@@ -156,7 +154,7 @@ mod tests {
         let src = NodeId::new();
         let tgt = NodeId::new();
         let edge = Edge::new(src, tgt, EdgeKind::DependsOn);
-        assert_eq!(*edge.effective_condition(), EdgeCondition::Always);
+        assert_eq!(*edge.effective_condition(), EdgeCondition::OnSuccess);
         assert!(edge.condition.is_none());
     }
 
@@ -182,8 +180,7 @@ mod tests {
     fn edge_display() {
         let src = NodeId::new();
         let tgt = NodeId::new();
-        let edge = Edge::new(src, tgt, EdgeKind::DataFlow)
-            .with_condition(EdgeCondition::OnFailure);
+        let edge = Edge::new(src, tgt, EdgeKind::DataFlow).with_condition(EdgeCondition::OnFailure);
         let display = format!("{edge}");
         assert!(display.contains("data_flow"));
         assert!(display.contains("on_failure"));

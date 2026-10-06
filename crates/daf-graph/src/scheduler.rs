@@ -95,6 +95,11 @@ impl WaveScheduler {
     /// wave are sorted by priority (descending).
     #[instrument(skip(self, graph))]
     pub fn plan_waves(&self, graph: &ExecutionGraph) -> Result<ExecutionPlan, GraphError> {
+        if self.max_concurrency == Some(0) {
+            return Err(GraphError::InvalidConfiguration(
+                "max concurrency must be positive".into(),
+            ));
+        }
         if graph.node_count() == 0 {
             return Ok(ExecutionPlan {
                 waves: vec![],
@@ -134,10 +139,7 @@ impl WaveScheduler {
             // Calculate estimated duration for this wave (max of all nodes).
             let estimated_duration = ready
                 .iter()
-                .filter_map(|id| {
-                    sim.get_node(*id)
-                        .and_then(|n| n.estimated_duration)
-                })
+                .filter_map(|id| sim.get_node(*id).and_then(|n| n.estimated_duration))
                 .max()
                 .unwrap_or(Duration::from_secs(1));
 
@@ -147,11 +149,7 @@ impl WaveScheduler {
                 estimated_duration,
             };
 
-            debug!(
-                wave = wave_number,
-                nodes = ready.len(),
-                "planned wave"
-            );
+            debug!(wave = wave_number, nodes = ready.len(), "planned wave");
 
             total_planned += ready.len();
 
@@ -169,8 +167,7 @@ impl WaveScheduler {
             }
         }
 
-        let total_estimated_duration: Duration =
-            waves.iter().map(|w| w.estimated_duration).sum();
+        let total_estimated_duration: Duration = waves.iter().map(|w| w.estimated_duration).sum();
         let parallelism_factor = if waves.is_empty() {
             0.0
         } else {

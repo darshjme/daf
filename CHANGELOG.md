@@ -5,6 +5,22 @@ All notable changes to DAF will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased — 2026-10-06 audit
+
+### Fixed
+- Conditional failure recovery, graph cancellation and admission limits; SDK middleware and task deadlines now govern actual handler execution.
+- TLS peer verification, bounded outbound channels, protocol validation, truthful runtime health and reliable listener shutdown.
+- Atomic state locks, variable precedence, secret debug redaction, durable vault rotation, record consolidation and rapid log rotation.
+- Non-destructive project initialization, strict local mission validation and ordered JSON task outcomes.
+
+### Added
+- Explicit asynchronous Sled persistence fence before durability-sensitive acknowledgements.
+- Evidence-based engineering standard, source-grounded architecture/protocol/memory documentation and real execution/TCP/persistence acceptance tests.
+
+### Changed
+- DDAL `perform_handshake_server` returns the parsed request directly. Callers authorize it, then call `complete_handshake_server`; see the protocol migration guide.
+- Unsupported output-conditional graph routing fails explicitly. Unknown mission fields are rejected.
+
 ## [0.1.0] - 2026-04-07
 
 ### Added

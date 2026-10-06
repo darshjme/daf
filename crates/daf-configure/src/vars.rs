@@ -28,6 +28,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::warn;
 
+/// Callback used to resolve vault references while rendering variables.
+pub type VaultResolver<'a> = Option<&'a dyn Fn(&str) -> Option<String>>;
+
 // ---------------------------------------------------------------------------
 // VarScope
 // ---------------------------------------------------------------------------
@@ -83,9 +86,7 @@ pub struct VarManager {
 impl VarManager {
     /// Create an empty variable manager.
     pub fn new() -> Self {
-        Self {
-            layers: Vec::new(),
-        }
+        Self { layers: Vec::new() }
     }
 
     /// Push a new variable layer at the given scope.
@@ -106,6 +107,7 @@ impl VarManager {
         // Keep layers sorted by scope precedence so highest-precedence
         // layers come last. Within the same scope, later pushes win
         // because we iterate in reverse.
+        self.layers.sort_by_key(|layer| layer.scope);
     }
 
     /// Remove all layers with the given scope.
@@ -159,21 +161,13 @@ impl VarManager {
     /// `vault_resolver` callback.
     ///
     /// Unresolved references are left as-is and a warning is logged.
-    pub fn render_template(
-        &self,
-        template: &str,
-        vault_resolver: Option<&dyn Fn(&str) -> Option<String>>,
-    ) -> String {
+    pub fn render_template(&self, template: &str, vault_resolver: VaultResolver<'_>) -> String {
         render_template_with_vars(template, &self.merged(), vault_resolver)
     }
 
     /// Render template substitutions in a JSON [`Value`], recursively
     /// walking strings, arrays, and objects.
-    pub fn render_value(
-        &self,
-        value: &Value,
-        vault_resolver: Option<&dyn Fn(&str) -> Option<String>>,
-    ) -> Value {
+    pub fn render_value(&self, value: &Value, vault_resolver: VaultResolver<'_>) -> Value {
         render_value_recursive(value, &self.merged(), vault_resolver)
     }
 
@@ -209,7 +203,7 @@ impl VarManager {
 fn render_template_with_vars(
     template: &str,
     vars: &HashMap<String, Value>,
-    vault_resolver: Option<&dyn Fn(&str) -> Option<String>>,
+    vault_resolver: VaultResolver<'_>,
 ) -> String {
     let mut result = String::with_capacity(template.len());
     let mut remaining = template;
@@ -238,7 +232,7 @@ fn render_template_with_vars(
 fn resolve_template_key(
     key: &str,
     vars: &HashMap<String, Value>,
-    vault_resolver: Option<&dyn Fn(&str) -> Option<String>>,
+    vault_resolver: VaultResolver<'_>,
 ) -> String {
     // Vault secret reference: {{ vault:secret_name }}
     if let Some(secret_name) = key.strip_prefix("vault:") {
@@ -293,7 +287,7 @@ fn value_to_string(v: &Value) -> String {
 fn render_value_recursive(
     value: &Value,
     vars: &HashMap<String, Value>,
-    vault_resolver: Option<&dyn Fn(&str) -> Option<String>>,
+    vault_resolver: VaultResolver<'_>,
 ) -> Value {
     match value {
         Value::String(s) => {
@@ -316,7 +310,10 @@ fn render_value_recursive(
             map.iter()
                 .map(|(k, v)| {
                     let rendered_key = render_template_with_vars(k, vars, vault_resolver);
-                    (rendered_key, render_value_recursive(v, vars, vault_resolver))
+                    (
+                        rendered_key,
+                        render_value_recursive(v, vars, vault_resolver),
+                    )
                 })
                 .collect(),
         ),
@@ -332,6 +329,17 @@ fn render_value_recursive(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn scope_precedence_is_independent_of_insertion_order() {
+        let mut mgr = VarManager::new();
+        mgr.set(VarScope::Task, "key", json!("task"));
+        mgr.set(VarScope::Global, "key", json!("global"));
+        mgr.set(VarScope::Play, "key", json!("play"));
+        assert_eq!(mgr.get("key"), Some(&json!("task")));
+        assert_eq!(mgr.merged()["key"], json!("task"));
+        assert_eq!(mgr.render_template("{{ key }}", None), "task");
+    }
 
     #[test]
     fn basic_resolution() {
@@ -471,10 +479,7 @@ mod tests {
         unsafe { std::env::set_var("DAF_TEST_VAR_12345", "hello") };
         mgr.inject_env();
 
-        assert_eq!(
-            mgr.get("env_DAF_TEST_VAR_12345"),
-            Some(&json!("hello"))
-        );
+        assert_eq!(mgr.get("env_DAF_TEST_VAR_12345"), Some(&json!("hello")));
         unsafe { std::env::remove_var("DAF_TEST_VAR_12345") };
     }
 

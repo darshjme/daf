@@ -13,7 +13,6 @@
 //! Run with:
 //!   cargo run -p daf-example-basic-agent
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -67,7 +66,7 @@ impl EchoAgent {
             ))
             .with_resource_limits(ResourceLimits {
                 max_memory_bytes: Some(64 * 1024 * 1024), // 64 MiB — echo is lightweight
-                max_cpu_ms: Some(60_000),                  // 1 minute max
+                max_cpu_ms: Some(60_000),                 // 1 minute max
                 max_connections: Some(16),
                 max_message_queue: Some(256),
             })
@@ -171,9 +170,7 @@ impl Agent for EchoAgent {
         }
 
         // Read the payload as a string (or fall back to hex representation)
-        let payload_text = msg
-            .payload_str()
-            .unwrap_or("<binary payload>");
+        let payload_text = msg.payload_str().unwrap_or("<binary payload>");
 
         info!(echo = payload_text, "Echoing message back");
 
@@ -270,8 +267,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // DafConfig, but for examples we use the RUST_LOG env var.
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with_target(true)
         .init();
@@ -304,52 +300,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     agent.initialize(&ctx).await?;
     info!("Agent initialized — status: {}", agent.status());
 
-    // 4. Simulate some inbound messages concurrently with execute
-    let msg_ctx = ctx.clone();
-    let agent_ref = &agent;
-
-    // Spawn a background task that sends messages into the agent
-    let msg_handle = tokio::spawn({
-        let msg_ctx = msg_ctx.clone();
-        // We need to demonstrate message handling, so we create fake messages
-        async move {
-            // Small delay to let execute() start first
-            tokio::time::sleep(Duration::from_millis(500)).await;
-
-            // Create a few sample messages
-            let sender = AgentId::new();
-            let messages = vec![
-                ("Hello, DAF!", MessageKind::Request),
-                ("Status check", MessageKind::Command),
-                ("Heartbeat ping", MessageKind::Heartbeat),
-            ];
-
-            for (payload, kind) in &messages {
-                let msg = Message::builder(*kind, sender)
-                    .target(msg_ctx.agent_id)
-                    .payload(Bytes::from(*payload))
-                    .build();
-
-                // We can't call agent methods from a spawned task without Arc,
-                // so we just log what we would send.
-                info!(
-                    payload = *payload,
-                    kind = %kind,
-                    msg_id = %msg.id,
-                    "Would send message to agent"
-                );
-
-                tokio::time::sleep(Duration::from_millis(800)).await;
-            }
+    // 4. Deliver local fixture messages while the agent executes.
+    let deliver_messages = async {
+        let sender = AgentId::new();
+        for (payload, kind) in [
+            ("Hello, DAF!", MessageKind::Request),
+            ("Status check", MessageKind::Command),
+            ("Heartbeat ping", MessageKind::Heartbeat),
+        ] {
+            let msg = Message::builder(kind, sender)
+                .target(ctx.agent_id)
+                .payload(Bytes::from(payload))
+                .build();
+            agent.handle_message(&ctx, msg).await?;
         }
-    });
-
-    // 5. Run the main execution loop
-    let result = agent.execute(&ctx).await?;
+        Ok::<(), DafError>(())
+    };
+    let (execution, delivery) = tokio::join!(agent.execute(&ctx), deliver_messages);
+    delivery?;
+    let result = execution?;
+    assert_eq!(result["messages_processed"], 3);
     info!(result = %result, "Agent execution completed");
-
-    // Wait for the message sender to finish
-    msg_handle.await?;
 
     // 6. Run a health check
     match agent.health_check().await {
@@ -358,9 +329,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 7. Graceful shutdown
-    agent
-        .shutdown(&ctx, Duration::from_secs(5))
-        .await?;
+    agent.shutdown(&ctx, Duration::from_secs(5)).await?;
 
     info!(
         final_status = %agent.status(),

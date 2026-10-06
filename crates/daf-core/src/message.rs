@@ -107,7 +107,9 @@ impl fmt::Display for MessageKind {
 
 /// Message delivery priority. Higher-priority messages are dequeued first
 /// when the transport layer supports priority ordering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Priority {
     /// Must be processed immediately; may preempt running work.
@@ -115,17 +117,12 @@ pub enum Priority {
     /// Important but not preemptive.
     High = 1,
     /// Default priority for most messages.
+    #[default]
     Normal = 2,
     /// Best-effort delivery; may be dropped under load.
     Low = 3,
     /// Batch / background processing.
     Background = 4,
-}
-
-impl Default for Priority {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 impl fmt::Display for Priority {
@@ -465,10 +462,7 @@ mod tests {
 
         let back: serde_json::Value = msg.payload_json().unwrap();
         assert_eq!(back["action"], "deploy");
-        assert_eq!(
-            msg.headers.get("content-type").unwrap(),
-            "application/json"
-        );
+        assert_eq!(msg.headers.get("content-type").unwrap(), "application/json");
     }
 
     #[test]

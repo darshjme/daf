@@ -219,18 +219,19 @@ pub async fn resolve_template(
                 result.push_str(&rest[..start]);
 
                 let after_prefix = &rest[start + 8..];
-                let end = after_prefix
-                    .find('}')
-                    .ok_or_else(|| VaultError::Provider("unclosed ${vault:...} reference".into()))?;
+                let end = after_prefix.find('}').ok_or_else(|| {
+                    VaultError::Provider("unclosed ${vault:...} reference".into())
+                })?;
 
                 let secret_name = &after_prefix[..end];
                 let secret = provider.resolve(secret_name).await?;
 
-                let value_str = String::from_utf8(secret.encrypted_value)
-                    .map_err(|_| VaultError::Provider(format!(
+                let value_str = String::from_utf8(secret.encrypted_value).map_err(|_| {
+                    VaultError::Provider(format!(
                         "secret '{}' is not valid UTF-8 for template interpolation",
                         secret_name
-                    )))?;
+                    ))
+                })?;
 
                 result.push_str(&value_str);
                 rest = &after_prefix[end + 1..];
@@ -267,7 +268,12 @@ mod tests {
     async fn vault_provider_resolves() {
         let (store, provider) = make_vault_provider().await;
         store
-            .store_secret("my_key", SecretKind::ApiKey, b"secret-value", AccessPolicy::AnyAgent)
+            .store_secret(
+                "my_key",
+                SecretKind::ApiKey,
+                b"secret-value",
+                AccessPolicy::AnyAgent,
+            )
             .await
             .unwrap();
 
@@ -311,7 +317,12 @@ mod tests {
     async fn chain_provider_fallback() {
         let (store, vault_prov) = make_vault_provider().await;
         store
-            .store_secret("vault_only", SecretKind::ApiKey, b"from-vault", AccessPolicy::AnyAgent)
+            .store_secret(
+                "vault_only",
+                SecretKind::ApiKey,
+                b"from-vault",
+                AccessPolicy::AnyAgent,
+            )
             .await
             .unwrap();
 
@@ -340,7 +351,12 @@ mod tests {
     async fn template_interpolation() {
         let (store, vault_prov) = make_vault_provider().await;
         store
-            .store_secret("api_key", SecretKind::ApiKey, b"sk-abc123", AccessPolicy::AnyAgent)
+            .store_secret(
+                "api_key",
+                SecretKind::ApiKey,
+                b"sk-abc123",
+                AccessPolicy::AnyAgent,
+            )
             .await
             .unwrap();
 
@@ -353,11 +369,21 @@ mod tests {
     async fn template_multiple_refs() {
         let (store, vault_prov) = make_vault_provider().await;
         store
-            .store_secret("host", SecretKind::Custom("config".into()), b"db.example.com", AccessPolicy::AnyAgent)
+            .store_secret(
+                "host",
+                SecretKind::Custom("config".into()),
+                b"db.example.com",
+                AccessPolicy::AnyAgent,
+            )
             .await
             .unwrap();
         store
-            .store_secret("port", SecretKind::Custom("config".into()), b"5432", AccessPolicy::AnyAgent)
+            .store_secret(
+                "port",
+                SecretKind::Custom("config".into()),
+                b"5432",
+                AccessPolicy::AnyAgent,
+            )
             .await
             .unwrap();
 

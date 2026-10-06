@@ -49,9 +49,9 @@ pub mod version;
 // ---------------------------------------------------------------------------
 
 pub use capability::{
-    best_match, score_capabilities, Capability, CapabilityRequirement, CapabilitySet, MatchScore,
+    Capability, CapabilityRequirement, CapabilitySet, MatchScore, best_match, score_capabilities,
 };
-pub use catalog::{builtin_templates, AgentTemplate, Catalog, CatalogEntry};
+pub use catalog::{AgentTemplate, Catalog, CatalogEntry, builtin_templates};
 pub use health::{
     AgentHealth, ClusterHealth, HealthCheck, HealthConfig, HealthMonitor, HealthStatus,
 };

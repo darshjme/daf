@@ -7,8 +7,8 @@ use crate::dag::ExecutionGraph;
 use crate::edge::EdgeKind;
 use crate::node::NodeState;
 
-use petgraph::visit::EdgeRef;
 use petgraph::Direction;
+use petgraph::visit::EdgeRef;
 use std::fmt::Write;
 
 // ---------------------------------------------------------------------------
@@ -31,7 +31,11 @@ pub fn to_dot(graph: &ExecutionGraph) -> String {
     let mut out = String::new();
     writeln!(out, "digraph \"{}\" {{", graph.name).unwrap();
     writeln!(out, "    rankdir=TB;").unwrap();
-    writeln!(out, "    node [shape=box, style=filled, fontname=\"Helvetica\"];").unwrap();
+    writeln!(
+        out,
+        "    node [shape=box, style=filled, fontname=\"Helvetica\"];"
+    )
+    .unwrap();
     writeln!(out, "    edge [fontname=\"Helvetica\", fontsize=10];").unwrap();
     writeln!(out).unwrap();
 
@@ -128,7 +132,10 @@ pub fn to_mermaid(graph: &ExecutionGraph) -> String {
     for idx in inner.node_indices() {
         let node = &inner[idx];
         let id = sanitize_mermaid_id(&node.id.0.to_string());
-        let label = format!("{}<br/><small>{} | {}</small>", node.name, node.kind, node.state);
+        let label = format!(
+            "{}<br/><small>{} | {}</small>",
+            node.name, node.kind, node.state
+        );
         // Use different node shapes based on kind.
         let shape = match node.kind {
             crate::node::NodeKind::Task => format!("    {id}[\"{label}\"]"),
@@ -166,13 +173,41 @@ pub fn to_mermaid(graph: &ExecutionGraph) -> String {
     writeln!(out).unwrap();
 
     // Style classes.
-    writeln!(out, "    classDef pending fill:#e0e0e0,stroke:#999,color:#616161").unwrap();
-    writeln!(out, "    classDef ready fill:#bbdefb,stroke:#1976d2,color:#1565c0").unwrap();
-    writeln!(out, "    classDef running fill:#fff9c4,stroke:#f9a825,color:#f57f17").unwrap();
-    writeln!(out, "    classDef succeeded fill:#c8e6c9,stroke:#4caf50,color:#2e7d32").unwrap();
-    writeln!(out, "    classDef failed fill:#ffcdd2,stroke:#ef5350,color:#c62828").unwrap();
-    writeln!(out, "    classDef skipped fill:#ffe0b2,stroke:#ff9800,color:#e65100").unwrap();
-    writeln!(out, "    classDef cancelled fill:#bdbdbd,stroke:#757575,color:#424242").unwrap();
+    writeln!(
+        out,
+        "    classDef pending fill:#e0e0e0,stroke:#999,color:#616161"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    classDef ready fill:#bbdefb,stroke:#1976d2,color:#1565c0"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    classDef running fill:#fff9c4,stroke:#f9a825,color:#f57f17"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    classDef succeeded fill:#c8e6c9,stroke:#4caf50,color:#2e7d32"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    classDef failed fill:#ffcdd2,stroke:#ef5350,color:#c62828"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    classDef skipped fill:#ffe0b2,stroke:#ff9800,color:#e65100"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    classDef cancelled fill:#bdbdbd,stroke:#757575,color:#424242"
+    )
+    .unwrap();
 
     // Apply classes.
     for idx in inner.node_indices() {

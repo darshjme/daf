@@ -5,10 +5,10 @@
 
 use anyhow::Result;
 use clap::Parser;
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 
-use daf::{Cli, Command};
 use daf::display::banner;
+use daf::{Cli, Command};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,11 +32,12 @@ async fn main() -> Result<()> {
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter)),
         )
+        .with_writer(std::io::stderr)
         .with_target(false)
         .init();
 
     // ---------- banner ---------------------------------------------------
-    if !quiet {
+    if !quiet && !matches!(format, daf::OutputFormat::Json) {
         banner();
     }
 

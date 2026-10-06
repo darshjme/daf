@@ -142,6 +142,7 @@ pub struct DafUnixListener {
     inner: tokio::net::UnixListener,
     /// Path to the socket file, kept for cleanup on drop.
     path: String,
+    socket_identity: (u64, u64),
 }
 
 #[cfg(unix)]
@@ -150,26 +151,26 @@ impl Listener for DafUnixListener {
     type Conn = crate::unix::UnixConnection;
 
     async fn bind(config: ListenerConfig) -> TransportResult<Self> {
-        // Remove stale socket file if present.
-        if std::path::Path::new(&config.address).exists() {
-            std::fs::remove_file(&config.address).ok();
-        }
-
-        let listener =
-            tokio::net::UnixListener::bind(&config.address).map_err(|e| {
-                if e.kind() == std::io::ErrorKind::AddrInUse {
-                    TransportError::AddressInUse {
-                        address: config.address.clone(),
-                    }
-                } else {
-                    TransportError::IoError(e)
+        // Binding must never unlink an existing file or an active listener.
+        // Explicit cleanup of a known stale socket belongs to the caller.
+        let listener = tokio::net::UnixListener::bind(&config.address).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                TransportError::AddressInUse {
+                    address: config.address.clone(),
                 }
-            })?;
+            } else {
+                TransportError::IoError(e)
+            }
+        })?;
 
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::symlink_metadata(&config.address)?;
+        let socket_identity = (metadata.dev(), metadata.ino());
         tracing::info!(path = %config.address, "Unix listener bound");
         Ok(Self {
             inner: listener,
             path: config.address,
+            socket_identity,
         })
     }
 
@@ -195,7 +196,11 @@ impl Listener for DafUnixListener {
 #[cfg(unix)]
 impl Drop for DafUnixListener {
     fn drop(&mut self) {
-        if std::path::Path::new(&self.path).exists() {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        if std::fs::symlink_metadata(&self.path).is_ok_and(|metadata| {
+            metadata.file_type().is_socket()
+                && (metadata.dev(), metadata.ino()) == self.socket_identity
+        }) {
             std::fs::remove_file(&self.path).ok();
             tracing::debug!(path = %self.path, "cleaned up Unix socket file");
         }

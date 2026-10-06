@@ -146,7 +146,7 @@ pub struct RetentionStats {
 
 /// Enforces retention policies on a log directory.
 ///
-/// Call [`sweep`] periodically (e.g. from a tokio timer) to clean up expired
+/// Call [`sweep`](Self::sweep) periodically (e.g. from a tokio timer) to clean up expired
 /// files and archive old ones.
 pub struct RetentionManager {
     /// Directory containing log files.
@@ -169,8 +169,12 @@ impl RetentionManager {
         let log_dir = log_dir.as_ref().to_path_buf();
         let archive_dir = archive_dir.as_ref().to_path_buf();
 
-        fs::create_dir_all(&log_dir).await.map_err(LoggerError::Io)?;
-        fs::create_dir_all(&archive_dir).await.map_err(LoggerError::Io)?;
+        fs::create_dir_all(&log_dir)
+            .await
+            .map_err(LoggerError::Io)?;
+        fs::create_dir_all(&archive_dir)
+            .await
+            .map_err(LoggerError::Io)?;
 
         Ok(Self {
             log_dir,
@@ -184,9 +188,7 @@ impl RetentionManager {
     pub async fn sweep(&self) -> Result<RetentionStats, LoggerError> {
         let mut stats = RetentionStats::default();
 
-        let mut entries = fs::read_dir(&self.log_dir)
-            .await
-            .map_err(LoggerError::Io)?;
+        let mut entries = fs::read_dir(&self.log_dir).await.map_err(LoggerError::Io)?;
 
         let mut file_infos: Vec<(PathBuf, u64, DateTime<Utc>)> = Vec::new();
 
@@ -197,10 +199,7 @@ impl RetentionManager {
             }
 
             // Only process .ndjson files.
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if ext != "ndjson" {
                 continue;
             }
@@ -217,7 +216,7 @@ impl RetentionManager {
 
             let modified: DateTime<Utc> = metadata
                 .modified()
-                .map(|t| DateTime::from(t))
+                .map(DateTime::from)
                 .unwrap_or_else(|_| Utc::now());
 
             file_infos.push((path, metadata.len(), modified));
@@ -373,8 +372,7 @@ mod tests {
 
     #[test]
     fn policy_archive_after() {
-        let policy = RetentionPolicy::keep_forever()
-            .with_archive_after(Duration::days(7));
+        let policy = RetentionPolicy::keep_forever().with_archive_after(Duration::days(7));
 
         let recent = Utc::now() - Duration::days(3);
         let old = Utc::now() - Duration::days(10);
@@ -446,8 +444,7 @@ mod tests {
         fs::write(&file_path, "{\"data\":1}\n").await.unwrap();
 
         // Policy: keep forever but archive after 0 days.
-        let policy = RetentionPolicy::keep_forever()
-            .with_archive_after(Duration::days(0));
+        let policy = RetentionPolicy::keep_forever().with_archive_after(Duration::days(0));
 
         let mgr = RetentionManager::new(&log_dir, &archive_dir, policy)
             .await
@@ -459,8 +456,7 @@ mod tests {
         assert!(!file_path.exists());
 
         // Should exist in archive dir.
-        let archived =
-            archive_dir.join("archivable_20240101T000000Z.ndjson.archived");
+        let archived = archive_dir.join("archivable_20240101T000000Z.ndjson.archived");
         assert!(archived.exists());
     }
 }

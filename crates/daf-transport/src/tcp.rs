@@ -204,12 +204,13 @@ impl TcpTransport {
 
     /// Accept the next inbound connection from the listener.
     pub async fn accept(&self) -> TransportResult<TcpConnection> {
-        let listener = self.listener.as_ref().ok_or_else(|| {
-            TransportError::InvalidAddress {
+        let listener = self
+            .listener
+            .as_ref()
+            .ok_or_else(|| TransportError::InvalidAddress {
                 address: self.config.bind_address.clone(),
                 reason: "listener not started; call listen() first".into(),
-            }
-        })?;
+            })?;
         listener.accept().await
     }
 

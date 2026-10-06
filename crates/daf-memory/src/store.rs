@@ -165,18 +165,14 @@ impl MemoryStore for InMemoryStore {
     }
 
     async fn metrics(&self) -> MemoryResult<MemoryMetrics> {
-        let mut metrics = MemoryMetrics::default();
-        metrics.total_memories = self.data.len() as u64;
+        let mut metrics = MemoryMetrics {
+            total_memories: self.data.len() as u64,
+            ..Default::default()
+        };
         for entry in self.data.iter() {
             let m = entry.value();
-            *metrics
-                .by_tier
-                .entry(m.tier.to_string())
-                .or_insert(0) += 1;
-            *metrics
-                .by_kind
-                .entry(m.kind.to_string())
-                .or_insert(0) += 1;
+            *metrics.by_tier.entry(m.tier.to_string()).or_insert(0) += 1;
+            *metrics.by_kind.entry(m.kind.to_string()).or_insert(0) += 1;
         }
         // Approximate storage by serializing one entry if available.
         if let Some(entry) = self.data.iter().next() {
@@ -193,10 +189,10 @@ impl MemoryStore for InMemoryStore {
 // SledStore
 // ---------------------------------------------------------------------------
 
-/// Sled-backed embedded store for hot and warm memory tiers.
+/// Sled-backed embedded memory store.
 ///
-/// Sled provides a lock-free B+ tree with crash-safe persistence and
-/// sub-millisecond reads for hot data. Ideal for the working set.
+/// Writes are buffered. Call [`SledStore::flush`] before acknowledging a
+/// durability-sensitive operation; write success alone is not a flush boundary.
 #[derive(Debug, Clone)]
 pub struct SledStore {
     db: sled::Db,
@@ -205,9 +201,8 @@ pub struct SledStore {
 impl SledStore {
     /// Open or create a sled database at the given path.
     pub fn open(path: impl AsRef<Path>) -> MemoryResult<Self> {
-        let db = sled::open(path.as_ref()).map_err(|e| {
-            MemoryError::StoreError(format!("failed to open sled db: {e}"))
-        })?;
+        let db = sled::open(path.as_ref())
+            .map_err(|e| MemoryError::StoreError(format!("failed to open sled db: {e}")))?;
         Ok(Self { db })
     }
 
@@ -218,6 +213,17 @@ impl SledStore {
             MemoryError::StoreError(format!("failed to open temporary sled db: {e}"))
         })?;
         Ok(Self { db })
+    }
+
+    /// Flush buffered mutations to persistent storage before acknowledging them.
+    ///
+    /// This does not provide an atomic transaction across multiple records.
+    pub async fn flush(&self) -> MemoryResult<()> {
+        self.db
+            .flush_async()
+            .await
+            .map_err(|error| MemoryError::StoreError(format!("sled flush failed: {error}")))?;
+        Ok(())
     }
 
     fn key(id: &MemoryId) -> Vec<u8> {
@@ -243,9 +249,9 @@ impl MemoryStore for SledStore {
     async fn store(&self, memory: &Memory) -> MemoryResult<()> {
         let key = Self::key(&memory.id);
         let value = Self::serialize(memory)?;
-        self.db.insert(key, value).map_err(|e| {
-            MemoryError::StoreError(format!("sled insert failed: {e}"))
-        })?;
+        self.db
+            .insert(key, value)
+            .map_err(|e| MemoryError::StoreError(format!("sled insert failed: {e}")))?;
         debug!("stored memory {} in sled", memory.id);
         Ok(())
     }
@@ -268,11 +274,15 @@ impl MemoryStore for SledStore {
             if results.len() >= limit {
                 break;
             }
-            let (_, value) = entry.map_err(|e| {
-                MemoryError::StoreError(format!("sled iteration error: {e}"))
-            })?;
+            let (_, value) =
+                entry.map_err(|e| MemoryError::StoreError(format!("sled iteration error: {e}")))?;
             let memory = Self::deserialize(&value)?;
-            if memory.content.to_string().to_lowercase().contains(&query_lower) {
+            if memory
+                .content
+                .to_string()
+                .to_lowercase()
+                .contains(&query_lower)
+            {
                 results.push(memory);
             }
         }
@@ -282,24 +292,26 @@ impl MemoryStore for SledStore {
     #[instrument(skip(self, memory), fields(id = %memory.id))]
     async fn update(&self, memory: &Memory) -> MemoryResult<()> {
         let key = Self::key(&memory.id);
-        if !self.db.contains_key(&key).map_err(|e| {
-            MemoryError::StoreError(format!("sled contains_key failed: {e}"))
-        })? {
+        if !self
+            .db
+            .contains_key(&key)
+            .map_err(|e| MemoryError::StoreError(format!("sled contains_key failed: {e}")))?
+        {
             return Err(MemoryError::NotFound(memory.id));
         }
         let value = Self::serialize(memory)?;
-        self.db.insert(key, value).map_err(|e| {
-            MemoryError::StoreError(format!("sled update failed: {e}"))
-        })?;
+        self.db
+            .insert(key, value)
+            .map_err(|e| MemoryError::StoreError(format!("sled update failed: {e}")))?;
         Ok(())
     }
 
     #[instrument(skip(self))]
     async fn delete(&self, id: &MemoryId) -> MemoryResult<()> {
         let key = Self::key(id);
-        self.db.remove(key).map_err(|e| {
-            MemoryError::StoreError(format!("sled delete failed: {e}"))
-        })?;
+        self.db
+            .remove(key)
+            .map_err(|e| MemoryError::StoreError(format!("sled delete failed: {e}")))?;
         Ok(())
     }
 
@@ -310,9 +322,8 @@ impl MemoryStore for SledStore {
             if results.len() >= limit {
                 break;
             }
-            let (_, value) = entry.map_err(|e| {
-                MemoryError::StoreError(format!("sled iteration error: {e}"))
-            })?;
+            let (_, value) =
+                entry.map_err(|e| MemoryError::StoreError(format!("sled iteration error: {e}")))?;
             let memory = Self::deserialize(&value)?;
             if memory.tags.iter().any(|t| t == tag) {
                 results.push(memory);
@@ -328,22 +339,22 @@ impl MemoryStore for SledStore {
             if results.len() >= limit {
                 break;
             }
-            let (_, value) = entry.map_err(|e| {
-                MemoryError::StoreError(format!("sled iteration error: {e}"))
-            })?;
+            let (_, value) =
+                entry.map_err(|e| MemoryError::StoreError(format!("sled iteration error: {e}")))?;
             results.push(Self::deserialize(&value)?);
         }
         Ok(results)
     }
 
     async fn metrics(&self) -> MemoryResult<MemoryMetrics> {
-        let mut metrics = MemoryMetrics::default();
-        metrics.total_memories = self.db.len() as u64;
-        metrics.storage_bytes = self.db.size_on_disk().unwrap_or(0);
+        let mut metrics = MemoryMetrics {
+            total_memories: self.db.len() as u64,
+            storage_bytes: self.db.size_on_disk().unwrap_or(0),
+            ..Default::default()
+        };
         for entry in self.db.iter() {
-            let (_, value) = entry.map_err(|e| {
-                MemoryError::StoreError(format!("sled iteration error: {e}"))
-            })?;
+            let (_, value) =
+                entry.map_err(|e| MemoryError::StoreError(format!("sled iteration error: {e}")))?;
             let memory = Self::deserialize(&value)?;
             *metrics.by_tier.entry(memory.tier.to_string()).or_insert(0) += 1;
             *metrics.by_kind.entry(memory.kind.to_string()).or_insert(0) += 1;
@@ -374,9 +385,8 @@ impl RocksStore {
         opts.set_max_open_files(256);
         opts.set_write_buffer_size(64 * 1024 * 1024); // 64 MB
 
-        let db = rocksdb::DB::open(&opts, path.as_ref()).map_err(|e| {
-            MemoryError::StoreError(format!("failed to open RocksDB: {e}"))
-        })?;
+        let db = rocksdb::DB::open(&opts, path.as_ref())
+            .map_err(|e| MemoryError::StoreError(format!("failed to open RocksDB: {e}")))?;
         Ok(Self { db })
     }
 
@@ -403,9 +413,9 @@ impl MemoryStore for RocksStore {
     async fn store(&self, memory: &Memory) -> MemoryResult<()> {
         let key = Self::key(&memory.id);
         let value = Self::serialize(memory)?;
-        self.db.put(&key, &value).map_err(|e| {
-            MemoryError::StoreError(format!("rocksdb put failed: {e}"))
-        })?;
+        self.db
+            .put(&key, &value)
+            .map_err(|e| MemoryError::StoreError(format!("rocksdb put failed: {e}")))?;
         debug!("stored memory {} in rocksdb", memory.id);
         Ok(())
     }
@@ -429,11 +439,15 @@ impl MemoryStore for RocksStore {
             if results.len() >= limit {
                 break;
             }
-            let (_, value) = item.map_err(|e| {
-                MemoryError::StoreError(format!("rocksdb iteration error: {e}"))
-            })?;
+            let (_, value) =
+                item.map_err(|e| MemoryError::StoreError(format!("rocksdb iteration error: {e}")))?;
             let memory = Self::deserialize(&value)?;
-            if memory.content.to_string().to_lowercase().contains(&query_lower) {
+            if memory
+                .content
+                .to_string()
+                .to_lowercase()
+                .contains(&query_lower)
+            {
                 results.push(memory);
             }
         }
@@ -443,24 +457,27 @@ impl MemoryStore for RocksStore {
     #[instrument(skip(self, memory), fields(id = %memory.id))]
     async fn update(&self, memory: &Memory) -> MemoryResult<()> {
         let key = Self::key(&memory.id);
-        if self.db.get(&key).map_err(|e| {
-            MemoryError::StoreError(format!("rocksdb get failed: {e}"))
-        })?.is_none() {
+        if self
+            .db
+            .get(&key)
+            .map_err(|e| MemoryError::StoreError(format!("rocksdb get failed: {e}")))?
+            .is_none()
+        {
             return Err(MemoryError::NotFound(memory.id));
         }
         let value = Self::serialize(memory)?;
-        self.db.put(&key, &value).map_err(|e| {
-            MemoryError::StoreError(format!("rocksdb update failed: {e}"))
-        })?;
+        self.db
+            .put(&key, &value)
+            .map_err(|e| MemoryError::StoreError(format!("rocksdb update failed: {e}")))?;
         Ok(())
     }
 
     #[instrument(skip(self))]
     async fn delete(&self, id: &MemoryId) -> MemoryResult<()> {
         let key = Self::key(id);
-        self.db.delete(&key).map_err(|e| {
-            MemoryError::StoreError(format!("rocksdb delete failed: {e}"))
-        })?;
+        self.db
+            .delete(&key)
+            .map_err(|e| MemoryError::StoreError(format!("rocksdb delete failed: {e}")))?;
         Ok(())
     }
 
@@ -472,9 +489,8 @@ impl MemoryStore for RocksStore {
             if results.len() >= limit {
                 break;
             }
-            let (_, value) = item.map_err(|e| {
-                MemoryError::StoreError(format!("rocksdb iteration error: {e}"))
-            })?;
+            let (_, value) =
+                item.map_err(|e| MemoryError::StoreError(format!("rocksdb iteration error: {e}")))?;
             let memory = Self::deserialize(&value)?;
             if memory.tags.iter().any(|t| t == tag) {
                 results.push(memory);
@@ -491,9 +507,8 @@ impl MemoryStore for RocksStore {
             if results.len() >= limit {
                 break;
             }
-            let (_, value) = item.map_err(|e| {
-                MemoryError::StoreError(format!("rocksdb iteration error: {e}"))
-            })?;
+            let (_, value) =
+                item.map_err(|e| MemoryError::StoreError(format!("rocksdb iteration error: {e}")))?;
             results.push(Self::deserialize(&value)?);
         }
         Ok(results)
@@ -503,9 +518,8 @@ impl MemoryStore for RocksStore {
         let mut metrics = MemoryMetrics::default();
         let iter = self.db.iterator(rocksdb::IteratorMode::Start);
         for item in iter {
-            let (_, value) = item.map_err(|e| {
-                MemoryError::StoreError(format!("rocksdb iteration error: {e}"))
-            })?;
+            let (_, value) =
+                item.map_err(|e| MemoryError::StoreError(format!("rocksdb iteration error: {e}")))?;
             metrics.total_memories += 1;
             metrics.storage_bytes += value.len() as u64;
             if let Ok(memory) = Self::deserialize(&value) {
@@ -541,7 +555,10 @@ mod tests {
     }
 
     async fn search_works(store: &dyn MemoryStore) {
-        let m1 = Memory::new(MemoryKind::Semantic, json!("Rust has zero-cost abstractions"));
+        let m1 = Memory::new(
+            MemoryKind::Semantic,
+            json!("Rust has zero-cost abstractions"),
+        );
         let m2 = Memory::new(MemoryKind::Semantic, json!("Python is dynamically typed"));
 
         store.store(&m1).await.unwrap();
@@ -571,10 +588,8 @@ mod tests {
     }
 
     async fn list_by_tag_works(store: &dyn MemoryStore) {
-        let m1 = Memory::new(MemoryKind::Semantic, json!("a"))
-            .with_tags(vec!["alpha".into()]);
-        let m2 = Memory::new(MemoryKind::Semantic, json!("b"))
-            .with_tags(vec!["beta".into()]);
+        let m1 = Memory::new(MemoryKind::Semantic, json!("a")).with_tags(vec!["alpha".into()]);
+        let m2 = Memory::new(MemoryKind::Semantic, json!("b")).with_tags(vec!["beta".into()]);
 
         store.store(&m1).await.unwrap();
         store.store(&m2).await.unwrap();
@@ -676,10 +691,8 @@ mod tests {
     #[tokio::test]
     async fn metrics_accurate() {
         let store = InMemoryStore::new();
-        let m1 = Memory::new(MemoryKind::Semantic, json!("a"))
-            .with_tier(MemoryTier::Hot);
-        let m2 = Memory::new(MemoryKind::Episodic, json!("b"))
-            .with_tier(MemoryTier::Cold);
+        let m1 = Memory::new(MemoryKind::Semantic, json!("a")).with_tier(MemoryTier::Hot);
+        let m2 = Memory::new(MemoryKind::Episodic, json!("b")).with_tier(MemoryTier::Cold);
 
         store.store(&m1).await.unwrap();
         store.store(&m2).await.unwrap();

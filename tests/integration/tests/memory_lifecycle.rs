@@ -4,11 +4,8 @@
 //! access, episode recording/retrieval, and memory consolidation.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use daf_core::agent::AgentId;
@@ -147,15 +144,15 @@ impl MemoryStore {
         action: &str,
         data: serde_json::Value,
     ) -> bool {
-        if let Some(ep) = self.episodes.iter_mut().find(|e| e.id == episode_id) {
-            if ep.ended_at.is_none() {
-                ep.entries.push(EpisodeEntry {
-                    timestamp: Utc::now(),
-                    action: action.to_string(),
-                    data,
-                });
-                return true;
-            }
+        if let Some(ep) = self.episodes.iter_mut().find(|e| e.id == episode_id)
+            && ep.ended_at.is_none()
+        {
+            ep.entries.push(EpisodeEntry {
+                timestamp: Utc::now(),
+                action: action.to_string(),
+                data,
+            });
+            return true;
         }
         false
     }
@@ -248,11 +245,16 @@ async fn memory_store_recall_forget_cycle() {
 
     // Recall
     let name = store.recall("project:name").expect("should find name");
+    assert!(!name.id.is_nil());
+    assert_eq!(name.key, "project:name");
+    assert!(name.created_at <= Utc::now());
     assert_eq!(name.value, serde_json::json!("DAF"));
     assert_eq!(name.access_count, 1);
     assert_eq!(name.tier, MemoryTier::Cold); // first access, still cold
 
-    let version = store.recall("project:version").expect("should find version");
+    let version = store
+        .recall("project:version")
+        .expect("should find version");
     assert_eq!(version.value, serde_json::json!("0.1.0"));
 
     // Missing key
@@ -280,7 +282,11 @@ async fn tier_promotion_on_frequent_access() {
     store.hot_threshold = 7;
 
     let agent = AgentId::new();
-    store.store("config:db_url", serde_json::json!("postgres://localhost"), agent);
+    store.store(
+        "config:db_url",
+        serde_json::json!("postgres://localhost"),
+        agent,
+    );
 
     // Initially cold.
     let entry = store.recall("config:db_url").unwrap();
@@ -343,6 +349,8 @@ async fn episode_recording_and_retrieval() {
 
     // Retrieve and verify.
     let episode = store.get_episode(episode_id).expect("should find episode");
+    assert!(episode.started_at <= episode.ended_at.unwrap());
+    assert!(episode.entries[0].data.is_object());
     assert_eq!(episode.agent_id, agent);
     assert_eq!(episode.entries.len(), 3);
     assert!(episode.ended_at.is_some());
@@ -357,11 +365,7 @@ async fn episode_recording_and_retrieval() {
     }
 
     // Cannot record to ended episode.
-    assert!(!store.record_episode_entry(
-        episode_id,
-        "late_entry",
-        serde_json::json!({}),
-    ));
+    assert!(!store.record_episode_entry(episode_id, "late_entry", serde_json::json!({}),));
 }
 
 // ---------------------------------------------------------------------------

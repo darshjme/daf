@@ -6,7 +6,6 @@
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -177,12 +176,13 @@ impl UnixTransport {
 
     /// Accept the next inbound connection.
     pub async fn accept(&self) -> TransportResult<UnixConnection> {
-        let listener = self.listener.as_ref().ok_or_else(|| {
-            TransportError::InvalidAddress {
+        let listener = self
+            .listener
+            .as_ref()
+            .ok_or_else(|| TransportError::InvalidAddress {
                 address: self.config.socket_path.clone(),
                 reason: "listener not started; call listen() first".into(),
-            }
-        })?;
+            })?;
         listener.accept().await
     }
 
@@ -207,7 +207,8 @@ impl UnixTransport {
 
     /// Remove a stale socket file without binding.
     pub fn cleanup_socket(path: &str) {
-        if Path::new(path).exists() {
+        use std::os::unix::fs::FileTypeExt;
+        if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_socket()) {
             std::fs::remove_file(path).ok();
             tracing::debug!(path = %path, "removed stale Unix socket");
         }
@@ -217,6 +218,21 @@ impl UnixTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn binding_and_cleanup_preserve_regular_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("valuable.txt");
+        std::fs::write(&file, b"preserve").unwrap();
+        let path = file.to_str().unwrap();
+        UnixTransport::cleanup_socket(path);
+        let mut transport = UnixTransport::new(UnixTransportConfig {
+            socket_path: path.into(),
+            ..Default::default()
+        });
+        assert!(transport.listen().await.is_err());
+        assert_eq!(std::fs::read(file).unwrap(), b"preserve");
+    }
 
     #[tokio::test]
     async fn unix_roundtrip() {

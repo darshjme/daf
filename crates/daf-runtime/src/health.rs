@@ -20,7 +20,7 @@ use tracing::{debug, warn};
 // ---------------------------------------------------------------------------
 
 /// Overall or per-subsystem health state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HealthStatus {
     /// Everything is operating normally.
@@ -30,6 +30,7 @@ pub enum HealthStatus {
     /// The system or subsystem is not functional.
     Unhealthy,
     /// Health status has not been determined yet (initial state).
+    #[default]
     Unknown,
 }
 
@@ -59,12 +60,6 @@ impl fmt::Display for HealthStatus {
             Self::Unknown => "unknown",
         };
         write!(f, "{s}")
-    }
-}
-
-impl Default for HealthStatus {
-    fn default() -> Self {
-        Self::Unknown
     }
 }
 
@@ -120,6 +115,17 @@ pub struct SubsystemHealth {
 }
 
 impl SubsystemHealth {
+    /// Report a subsystem whose probes have not been wired up.
+    pub fn unknown(kind: SubsystemKind) -> Self {
+        Self {
+            kind,
+            status: HealthStatus::Unknown,
+            message: "subsystem probe not connected".into(),
+            last_checked: Utc::now(),
+            details: HashMap::new(),
+        }
+    }
+
     /// Create a healthy subsystem report.
     pub fn healthy(kind: SubsystemKind) -> Self {
         Self {
@@ -162,7 +168,13 @@ impl SubsystemHealth {
 
 impl fmt::Display for SubsystemHealth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{status}] {kind}: {msg}", status = self.status, kind = self.kind, msg = self.message)
+        write!(
+            f,
+            "[{status}] {kind}: {msg}",
+            status = self.status,
+            kind = self.kind,
+            msg = self.message
+        )
     }
 }
 
@@ -200,10 +212,14 @@ impl SystemHealth {
         version: impl Into<String>,
         uptime: Duration,
     ) -> Self {
-        let overall = subsystems
-            .iter()
-            .map(|s| s.status)
-            .fold(HealthStatus::Healthy, HealthStatus::merge);
+        let overall = if subsystems.is_empty() {
+            HealthStatus::Unknown
+        } else {
+            subsystems
+                .iter()
+                .map(|s| s.status)
+                .fold(HealthStatus::Healthy, HealthStatus::merge)
+        };
 
         let map: HashMap<SubsystemKind, SubsystemHealth> =
             subsystems.into_iter().map(|s| (s.kind, s)).collect();
@@ -272,10 +288,7 @@ struct HealthMonitorInner {
 
 impl HealthMonitor {
     /// Create a new health monitor.
-    pub fn new(
-        node_name: impl Into<String>,
-        interval: Duration,
-    ) -> Self {
+    pub fn new(node_name: impl Into<String>, interval: Duration) -> Self {
         let node_name = node_name.into();
         let initial = SystemHealth {
             status: HealthStatus::Unknown,
@@ -309,12 +322,8 @@ impl HealthMonitor {
             .to_std()
             .unwrap_or(Duration::ZERO);
 
-        let health = SystemHealth::from_subsystems(
-            reports,
-            &self.inner.node_name,
-            crate::VERSION,
-            uptime,
-        );
+        let health =
+            SystemHealth::from_subsystems(reports, &self.inner.node_name, crate::VERSION, uptime);
 
         if !health.status.is_healthy() {
             warn!(

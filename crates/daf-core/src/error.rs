@@ -217,11 +217,13 @@ mod tests {
     fn retryable_classification() {
         assert!(DafError::transport("conn reset", true).is_retryable());
         assert!(!DafError::transport("bad cert", false).is_retryable());
-        assert!(DafError::TimeoutError {
-            operation: "rpc".into(),
-            duration: std::time::Duration::from_secs(5),
-        }
-        .is_retryable());
+        assert!(
+            DafError::TimeoutError {
+                operation: "rpc".into(),
+                duration: std::time::Duration::from_secs(5),
+            }
+            .is_retryable()
+        );
         assert!(!DafError::Internal("bug".into()).is_retryable());
     }
 

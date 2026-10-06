@@ -3,14 +3,11 @@
 //! Provides helpers to spin up minimal runtimes, create test agents,
 //! establish channels, and build task graphs for integration testing.
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use chrono::Utc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -18,7 +15,7 @@ use daf_core::agent::{
     Agent, AgentCapability, AgentContext, AgentId, AgentKind, AgentManifest, AgentStatus,
 };
 use daf_core::error::{DafError, DafResult};
-use daf_core::message::{Message, MessageKind, Priority};
+use daf_core::message::{Message, MessageKind};
 
 // ---------------------------------------------------------------------------
 // Test tracing initialization
@@ -70,10 +67,11 @@ impl TestAgent {
     /// Create a specialist agent.
     pub fn specialist(name: &str) -> Self {
         let mut agent = Self::new(name, AgentKind::Specialist);
-        agent.manifest = agent
-            .manifest
-            .clone()
-            .with_capability(AgentCapability::new(name, "1.0.0", "Test capability"));
+        agent.manifest = agent.manifest.clone().with_capability(AgentCapability::new(
+            name,
+            "1.0.0",
+            "Test capability",
+        ));
         agent
     }
 

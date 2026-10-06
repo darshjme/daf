@@ -95,6 +95,7 @@ pub struct FileWriter {
     prefix: String,
     policy: RotationPolicy,
     state: Arc<Mutex<FileState>>,
+    operations: tokio::sync::Mutex<()>,
 }
 
 impl FileWriter {
@@ -124,12 +125,13 @@ impl FileWriter {
             prefix,
             policy,
             state,
+            operations: tokio::sync::Mutex::new(()),
         })
     }
 
     fn make_path(dir: &Path, prefix: &str) -> PathBuf {
         let ts = Utc::now().format("%Y%m%dT%H%M%SZ");
-        dir.join(format!("{prefix}_{ts}.ndjson"))
+        dir.join(format!("{prefix}_{ts}_{}.ndjson", Uuid::now_v7()))
     }
 
     /// Check whether the current file needs rotation.
@@ -145,6 +147,7 @@ impl FileWriter {
 #[async_trait]
 impl LogWriter for FileWriter {
     async fn write_entry(&self, entry: &LogEntry) -> Result<(), LoggerError> {
+        let _operation = self.operations.lock().await;
         let mut line = serde_json::to_string(entry).map_err(LoggerError::Serde)?;
         line.push('\n');
         let line_len = line.len() as u64;
@@ -161,7 +164,6 @@ impl LogWriter for FileWriter {
                 state.current_size = 0;
                 state.opened_at = Utc::now();
             }
-            state.current_size += line_len;
             state.current_path.clone()
         };
 
@@ -175,17 +177,23 @@ impl LogWriter for FileWriter {
         file.write_all(line.as_bytes())
             .await
             .map_err(LoggerError::Io)?;
+        file.sync_data().await.map_err(LoggerError::Io)?;
+        self.state.lock().current_size += line_len;
 
         Ok(())
     }
 
     async fn flush(&self) -> Result<(), LoggerError> {
-        // Append mode — each write is flushed at the OS level.
+        // Each successful write calls sync_data before returning.
         Ok(())
     }
 
     async fn rotate(&self) -> Result<(), LoggerError> {
+        let _operation = self.operations.lock().await;
         let mut state = self.state.lock();
+        if state.closed {
+            return Err(LoggerError::WriterClosed);
+        }
         let new_path = Self::make_path(&self.dir, &self.prefix);
         info!(new = %new_path.display(), "manual log rotation");
         state.current_path = new_path;
@@ -195,6 +203,7 @@ impl LogWriter for FileWriter {
     }
 
     async fn close(&self) -> Result<(), LoggerError> {
+        let _operation = self.operations.lock().await;
         let mut state = self.state.lock();
         state.closed = true;
         info!("FileWriter closed");
@@ -222,9 +231,8 @@ impl RocksWriter {
         opts.create_if_missing(true);
         opts.set_compression_type(rocksdb::DBCompressionType::Zstd);
 
-        let db = rocksdb::DB::open(&opts, path.as_ref()).map_err(|e| {
-            LoggerError::Storage(format!("RocksDB open failed: {e}"))
-        })?;
+        let db = rocksdb::DB::open(&opts, path.as_ref())
+            .map_err(|e| LoggerError::Storage(format!("RocksDB open failed: {e}")))?;
 
         info!(path = %path.as_ref().display(), "RocksWriter initialized");
 
@@ -254,8 +262,7 @@ impl RocksWriter {
             if !key_str.starts_with(&prefix) {
                 break;
             }
-            let entry: LogEntry =
-                serde_json::from_slice(&value).map_err(LoggerError::Serde)?;
+            let entry: LogEntry = serde_json::from_slice(&value).map_err(LoggerError::Serde)?;
             entries.push(entry);
         }
 
@@ -440,6 +447,25 @@ mod tests {
         w.close().await.unwrap();
         let result = w.write_entry(&make_entry(0)).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn rapid_rotation_uses_distinct_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let writer = FileWriter::new(tmp.path(), "test", RotationPolicy::default())
+            .await
+            .unwrap();
+        writer.write_entry(&make_entry(0)).await.unwrap();
+        writer.rotate().await.unwrap();
+        writer.write_entry(&make_entry(1)).await.unwrap();
+        let mut files = fs::read_dir(tmp.path()).await.unwrap();
+        let mut count = 0;
+        while files.next_entry().await.unwrap().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 2);
+        writer.close().await.unwrap();
+        assert!(writer.rotate().await.is_err());
     }
 
     #[tokio::test]

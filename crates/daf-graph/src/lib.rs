@@ -59,4 +59,4 @@ pub use executor::{ExecutionProgress, GraphExecutor, TaskHandler};
 pub use node::{Node, NodeHandle, NodeId, NodeKind, NodeState, TaskSpec};
 pub use scheduler::{ExecutionPlan, Wave, WaveScheduler};
 pub use visualize::{to_dot, to_mermaid};
-pub use walker::{ancestors, descendants, leaves, roots, BreadthFirst, DepthFirst};
+pub use walker::{BreadthFirst, DepthFirst, ancestors, descendants, leaves, roots};
