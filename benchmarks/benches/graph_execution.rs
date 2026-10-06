@@ -3,7 +3,7 @@
 //! Measures DAG construction, topological sort, wave planning, and critical
 //! path calculation across varying graph sizes.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use uuid::Uuid;
@@ -29,7 +29,7 @@ struct BenchNode {
 #[derive(Debug, Clone)]
 struct BenchDag {
     nodes: Vec<BenchNode>,
-    adjacency: HashMap<Uuid, Vec<Uuid>>,   // parent -> children
+    adjacency: HashMap<Uuid, Vec<Uuid>>, // parent -> children
     in_degree: HashMap<Uuid, usize>,
 }
 
@@ -37,7 +37,7 @@ impl BenchDag {
     /// Build a DAG with `n` nodes. Each node (except the first) depends on
     /// one or two earlier nodes, creating a realistic dependency fan-out.
     fn build(n: usize) -> Self {
-        let mut nodes = Vec::with_capacity(n);
+        let mut nodes: Vec<BenchNode> = Vec::with_capacity(n);
         let mut adjacency: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
         let mut in_degree: HashMap<Uuid, usize> = HashMap::new();
 
@@ -66,7 +66,11 @@ impl BenchDag {
             nodes.push(BenchNode { id, deps });
         }
 
-        Self { nodes, adjacency, in_degree }
+        Self {
+            nodes,
+            adjacency,
+            in_degree,
+        }
     }
 
     /// Kahn's algorithm topological sort.
@@ -74,7 +78,7 @@ impl BenchDag {
         let mut in_deg = self.in_degree.clone();
         let mut queue: VecDeque<Uuid> = in_deg
             .iter()
-            .filter(|(_, &d)| d == 0)
+            .filter(|&(_, &d)| d == 0)
             .map(|(&id, _)| id)
             .collect();
         let mut sorted = Vec::with_capacity(self.nodes.len());
@@ -145,16 +149,12 @@ fn bench_dag_construction(c: &mut Criterion) {
     let mut group = c.benchmark_group("graph/dag_construction");
 
     for &size in GRAPH_SIZES {
-        group.bench_with_input(
-            BenchmarkId::new("build", size),
-            &size,
-            |b, &n| {
-                b.iter(|| {
-                    let dag = BenchDag::build(n);
-                    criterion::black_box(dag);
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("build", size), &size, |b, &n| {
+            b.iter(|| {
+                let dag = BenchDag::build(n);
+                criterion::black_box(dag);
+            });
+        });
     }
     group.finish();
 }
@@ -165,16 +165,12 @@ fn bench_topological_sort(c: &mut Criterion) {
     for &size in GRAPH_SIZES {
         let dag = BenchDag::build(size);
 
-        group.bench_with_input(
-            BenchmarkId::new("kahn", size),
-            &dag,
-            |b, dag| {
-                b.iter(|| {
-                    let sorted = dag.topological_sort();
-                    criterion::black_box(sorted);
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("kahn", size), &dag, |b, dag| {
+            b.iter(|| {
+                let sorted = dag.topological_sort();
+                criterion::black_box(sorted);
+            });
+        });
     }
     group.finish();
 }
@@ -185,16 +181,12 @@ fn bench_wave_planning(c: &mut Criterion) {
     for &size in GRAPH_SIZES {
         let dag = BenchDag::build(size);
 
-        group.bench_with_input(
-            BenchmarkId::new("plan_waves", size),
-            &dag,
-            |b, dag| {
-                b.iter(|| {
-                    let waves = dag.plan_waves();
-                    criterion::black_box(waves);
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("plan_waves", size), &dag, |b, dag| {
+            b.iter(|| {
+                let waves = dag.plan_waves();
+                criterion::black_box(waves);
+            });
+        });
     }
     group.finish();
 }
@@ -205,16 +197,12 @@ fn bench_critical_path(c: &mut Criterion) {
     for &size in GRAPH_SIZES {
         let dag = BenchDag::build(size);
 
-        group.bench_with_input(
-            BenchmarkId::new("longest_path", size),
-            &dag,
-            |b, dag| {
-                b.iter(|| {
-                    let length = dag.critical_path_length();
-                    criterion::black_box(length);
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("longest_path", size), &dag, |b, dag| {
+            b.iter(|| {
+                let length = dag.critical_path_length();
+                criterion::black_box(length);
+            });
+        });
     }
     group.finish();
 }
@@ -230,28 +218,24 @@ fn bench_graph_traversal(c: &mut Criterion) {
         let dag = BenchDag::build(size);
 
         // BFS from root
-        group.bench_with_input(
-            BenchmarkId::new("bfs_full", size),
-            &dag,
-            |b, dag| {
-                let root = dag.nodes[0].id;
-                b.iter(|| {
-                    let mut visited = HashSet::new();
-                    let mut queue = VecDeque::new();
-                    queue.push_back(root);
-                    while let Some(current) = queue.pop_front() {
-                        if visited.insert(current) {
-                            if let Some(children) = dag.adjacency.get(&current) {
-                                for &child in children {
-                                    queue.push_back(child);
-                                }
+        group.bench_with_input(BenchmarkId::new("bfs_full", size), &dag, |b, dag| {
+            let root = dag.nodes[0].id;
+            b.iter(|| {
+                let mut visited = HashSet::new();
+                let mut queue = VecDeque::new();
+                queue.push_back(root);
+                while let Some(current) = queue.pop_front() {
+                    if visited.insert(current) {
+                        if let Some(children) = dag.adjacency.get(&current) {
+                            for &child in children {
+                                queue.push_back(child);
                             }
                         }
                     }
-                    criterion::black_box(visited.len());
-                });
-            },
-        );
+                }
+                criterion::black_box(visited.len());
+            });
+        });
     }
     group.finish();
 }

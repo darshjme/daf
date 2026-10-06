@@ -312,11 +312,7 @@ impl TestHarness {
     }
 
     /// Create a test message with headers.
-    pub fn make_routed_message(
-        &self,
-        routing_key: &str,
-        payload: impl Into<Bytes>,
-    ) -> Message {
+    pub fn make_routed_message(&self, routing_key: &str, payload: impl Into<Bytes>) -> Message {
         Message::builder(MessageKind::Request, AgentId::new())
             .header("routing-key", routing_key)
             .payload(payload.into())
@@ -476,7 +472,10 @@ mod tests {
     fn test_harness_creates() {
         let harness = TestHarness::new();
         assert_eq!(harness.agent_count(), 0);
-        assert_eq!(harness.config().environment, crate::config::Environment::Test);
+        assert_eq!(
+            harness.config().environment,
+            crate::config::Environment::Test
+        );
     }
 
     #[test]

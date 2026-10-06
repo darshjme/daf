@@ -9,6 +9,8 @@ authors.workspace = true
 description = "Agent runtime: process isolation, resource limits, lifecycle management, health monitoring"
 
 [dependencies]
+daf-sdk = { path = "../daf-sdk" }
+sled.workspace = true
 daf-core = { path = "../daf-core" }
 daf-ddal = { path = "../daf-ddal" }
 daf-transport = { path = "../daf-transport" }
@@ -29,6 +31,9 @@ async-trait.workspace = true
 dashmap.workspace = true
 parking_lot.workspace = true
 crossbeam.workspace = true
+bytes.workspace = true
+tokio-util.workspace = true
+ring.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

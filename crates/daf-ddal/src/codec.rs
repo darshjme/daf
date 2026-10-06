@@ -117,6 +117,8 @@ impl Decoder for DdalCodec {
             return Ok(None);
         }
 
+        Frame::validate_header(src)?;
+
         // Step 3: Peek at the payload length (offset 12..16) to determine
         // total frame size.
         let payload_len = u32::from_be_bytes([src[12], src[13], src[14], src[15]]);
@@ -131,7 +133,9 @@ impl Decoder for DdalCodec {
 
         // Step 4: Do we have the full frame?
         if src.len() < total {
-            src.reserve(total - src.len());
+            // Let the transport grow its read buffer as bytes arrive. A peer
+            // advertising a large frame and then stalling must not reserve
+            // that entire payload immediately for every connection.
             return Ok(None);
         }
 
@@ -153,14 +157,29 @@ impl Encoder<Frame> for DdalCodec {
     type Error = DdalCodecError;
 
     fn encode(&mut self, frame: Frame, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        let total = HEADER_SIZE + frame.payload_len as usize;
-        if total > self.max_frame_size {
+        if !crate::protocol::ProtocolVersion::CURRENT.is_compatible_with(&frame.version) {
+            return Err(FrameDecodeError::UnsupportedVersion(frame.version).into());
+        }
+        // Frame fields are public; never trust a forged length or stale checksum.
+        let total = HEADER_SIZE + frame.payload.len();
+        if frame.payload.len() > MAX_PAYLOAD_SIZE as usize || total > self.max_frame_size {
             return Err(DdalCodecError::FrameTooLarge {
                 size: total,
-                max: self.max_frame_size,
+                max: self
+                    .max_frame_size
+                    .min(HEADER_SIZE + MAX_PAYLOAD_SIZE as usize),
             });
         }
-
+        if frame.payload.len() != frame.payload_len as usize {
+            return Err(DdalCodecError::InvalidFrame(
+                "payload length does not match payload",
+            ));
+        }
+        if !frame.verify_checksum() {
+            return Err(DdalCodecError::InvalidFrame(
+                "checksum does not match frame",
+            ));
+        }
         let encoded = frame.encode_to_bytes();
         dst.extend_from_slice(&encoded);
         Ok(())
@@ -174,6 +193,8 @@ impl Encoder<Frame> for DdalCodec {
 /// Errors produced by [`DdalCodec`] during encoding or decoding.
 #[derive(Debug, thiserror::Error)]
 pub enum DdalCodecError {
+    #[error("invalid frame: {0}")]
+    InvalidFrame(&'static str),
     #[error("frame too large: {size} bytes exceeds codec maximum of {max}")]
     FrameTooLarge { size: usize, max: usize },
 
@@ -196,6 +217,88 @@ mod tests {
 
     fn codec() -> DdalCodec {
         DdalCodec::new()
+    }
+
+    #[test]
+    fn forged_length_cannot_bypass_encode_limit() {
+        let mut frame = Frame::data(1, Bytes::from(vec![0; 100]));
+        frame.payload_len = 0;
+        let mut dst = BytesMut::new();
+        assert!(
+            DdalCodec::with_max_frame_size(HEADER_SIZE + 10)
+                .encode(frame, &mut dst)
+                .is_err()
+        );
+        assert!(dst.is_empty());
+    }
+
+    #[test]
+    fn stale_checksum_cannot_be_encoded() {
+        let mut frame = Frame::data(1, Bytes::from_static(b"one"));
+        frame.payload = Bytes::from_static(b"two");
+        assert!(
+            DdalCodec::new()
+                .encode(frame, &mut BytesMut::new())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn unsupported_outgoing_version_leaves_destination_unchanged() {
+        let mut frame = Frame::control(FrameType::Ping, 0);
+        frame.version.major = 99;
+        frame.checksum = frame.compute_checksum();
+        let mut dst = BytesMut::from(&b"existing bytes"[..]);
+        let original = dst.clone();
+        assert!(matches!(
+            codec().encode(frame, &mut dst),
+            Err(DdalCodecError::Protocol(
+                FrameDecodeError::UnsupportedVersion(_)
+            ))
+        ));
+        assert_eq!(dst, original);
+    }
+
+    #[test]
+    fn invalid_type_is_rejected_without_buffering_advertised_payload() {
+        let frame = Frame::control(FrameType::Ping, 0);
+        let mut header = frame.encode_to_bytes();
+        header[7] = 0xff;
+        header[12..16].copy_from_slice(&MAX_PAYLOAD_SIZE.to_be_bytes());
+        let original = header.clone();
+        assert!(matches!(
+            codec().decode(&mut header),
+            Err(DdalCodecError::Protocol(
+                FrameDecodeError::UnknownFrameType(0xff)
+            ))
+        ));
+        assert_eq!(header, original);
+        assert!(header.capacity() < MAX_PAYLOAD_SIZE as usize);
+    }
+
+    #[test]
+    fn stalled_large_frame_does_not_preallocate_advertised_payload() {
+        let frame = Frame::control(FrameType::Data, 1);
+        let mut header = frame.encode_to_bytes();
+        header[12..16].copy_from_slice(&MAX_PAYLOAD_SIZE.to_be_bytes());
+        assert!(codec().decode(&mut header).unwrap().is_none());
+        assert_eq!(header.len(), HEADER_SIZE);
+        assert!(header.capacity() < MAX_PAYLOAD_SIZE as usize);
+    }
+
+    #[test]
+    fn every_header_and_payload_split_preserves_incremental_frame() {
+        let frame = Frame::data(7, Bytes::from_static(b"incremental payload"));
+        let encoded = frame.encode_to_bytes();
+        for split in 0..encoded.len() {
+            let mut c = codec();
+            let mut buf = BytesMut::from(&encoded[..split]);
+            assert!(c.decode(&mut buf).unwrap().is_none(), "split {split}");
+            assert_eq!(&buf[..], &encoded[..split], "split {split}");
+            buf.extend_from_slice(&encoded[split..]);
+            assert_eq!(c.decode(&mut buf).unwrap(), Some(frame.clone()));
+            assert!(buf.is_empty());
+        }
     }
 
     #[test]

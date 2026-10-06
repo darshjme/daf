@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use ring::aead::{self, Aad, BoundKey, Nonce, NonceSequence, NONCE_LEN};
+use ring::aead::{self, Aad, BoundKey, NONCE_LEN, Nonce, NonceSequence};
 use ring::pbkdf2;
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
@@ -376,10 +376,7 @@ impl KeyRing {
         let master = self.master.as_ref().ok_or(VaultError::Sealed)?;
         let dk = DataKey::generate()?;
         let wrapped = master.encrypt(dk.raw())?;
-        let wdk = WrappedDataKey {
-            id: dk.id,
-            wrapped,
-        };
+        let wdk = WrappedDataKey { id: dk.id, wrapped };
         self.wrapped_keys.insert(dk.id, wdk);
         Ok(dk)
     }
@@ -429,13 +426,7 @@ impl KeyRing {
         let mut new_wrapped = HashMap::new();
         for (kid, material) in &unwrapped {
             let wrapped = new_master.encrypt(material)?;
-            new_wrapped.insert(
-                *kid,
-                WrappedDataKey {
-                    id: *kid,
-                    wrapped,
-                },
-            );
+            new_wrapped.insert(*kid, WrappedDataKey { id: *kid, wrapped });
         }
 
         // Zeroize unwrapped material.
@@ -506,8 +497,8 @@ fn aead_encrypt(key: &[u8; KEY_LEN], plaintext: &[u8]) -> VaultResult<Vec<u8>> {
     rng.fill(&mut nonce_bytes)
         .map_err(|_| VaultError::Crypto("nonce generation failed".into()))?;
 
-    let unbound =
-        aead::UnboundKey::new(&aead::AES_256_GCM, key).map_err(|_| VaultError::Crypto("invalid key".into()))?;
+    let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, key)
+        .map_err(|_| VaultError::Crypto("invalid key".into()))?;
     let mut sealing_key = aead::SealingKey::new(unbound, CounterNonce::new(nonce_bytes));
 
     let mut in_out = plaintext.to_vec();
@@ -532,14 +523,16 @@ fn aead_decrypt(key: &[u8; KEY_LEN], data: &[u8]) -> VaultResult<Vec<u8>> {
     let mut nonce_arr = [0u8; NONCE_LEN];
     nonce_arr.copy_from_slice(nonce_bytes);
 
-    let unbound =
-        aead::UnboundKey::new(&aead::AES_256_GCM, key).map_err(|_| VaultError::Crypto("invalid key".into()))?;
+    let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, key)
+        .map_err(|_| VaultError::Crypto("invalid key".into()))?;
     let mut opening_key = aead::OpeningKey::new(unbound, CounterNonce::new(nonce_arr));
 
     let mut in_out = ct_and_tag.to_vec();
     let plaintext = opening_key
         .open_in_place(Aad::empty(), &mut in_out)
-        .map_err(|_| VaultError::Crypto("decryption failed — wrong key or corrupted data".into()))?;
+        .map_err(|_| {
+            VaultError::Crypto("decryption failed — wrong key or corrupted data".into())
+        })?;
 
     Ok(plaintext.to_vec())
 }

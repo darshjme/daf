@@ -7,8 +7,8 @@
 use crate::dag::ExecutionGraph;
 use crate::node::{Node, NodeId};
 
-use petgraph::graph::NodeIndex;
 use petgraph::Direction;
+use petgraph::graph::NodeIndex;
 use std::collections::{HashSet, VecDeque};
 
 // ---------------------------------------------------------------------------
@@ -59,9 +59,8 @@ impl<'g> Iterator for DepthFirst<'g> {
             }
             // Push successors (outgoing neighbors) onto the stack.
             let inner = self.graph.inner();
-            let successors: Vec<NodeIndex> = inner
-                .neighbors_directed(idx, Direction::Outgoing)
-                .collect();
+            let successors: Vec<NodeIndex> =
+                inner.neighbors_directed(idx, Direction::Outgoing).collect();
             for succ in successors.into_iter().rev() {
                 if !self.visited.contains(&succ) {
                     self.stack.push(succ);
@@ -230,9 +229,7 @@ mod tests {
     #[test]
     fn dfs_visits_all_nodes() {
         let (g, _, _, _, _) = build_diamond();
-        let visited: Vec<String> = DepthFirst::from_roots(&g)
-            .map(|n| n.name.clone())
-            .collect();
+        let visited: Vec<String> = DepthFirst::from_roots(&g).map(|n| n.name.clone()).collect();
         assert_eq!(visited.len(), 4);
         // DFS should visit a first.
         assert_eq!(visited[0], "a");
@@ -299,9 +296,7 @@ mod tests {
     #[test]
     fn dfs_from_specific_root() {
         let (g, _, b, _, _) = build_diamond();
-        let visited: Vec<String> = DepthFirst::new(&g, &[b])
-            .map(|n| n.name.clone())
-            .collect();
+        let visited: Vec<String> = DepthFirst::new(&g, &[b]).map(|n| n.name.clone()).collect();
         // Starting from b, should visit b and d.
         assert_eq!(visited.len(), 2);
         assert!(visited.contains(&"b".to_string()));
@@ -331,9 +326,7 @@ mod tests {
         // Both are roots, both should be visited.
         assert_eq!(bfs.len(), 2);
 
-        let dfs: Vec<String> = DepthFirst::from_roots(&g)
-            .map(|n| n.name.clone())
-            .collect();
+        let dfs: Vec<String> = DepthFirst::from_roots(&g).map(|n| n.name.clone()).collect();
         assert_eq!(dfs.len(), 2);
     }
 }

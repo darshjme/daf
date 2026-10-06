@@ -112,10 +112,7 @@ impl HandlerChain {
 
         // Index by listen targets.
         for listen in &handler.listen {
-            self.name_index
-                .entry(listen.clone())
-                .or_default()
-                .push(idx);
+            self.name_index.entry(listen.clone()).or_default().push(idx);
         }
 
         self.handlers.push(handler);

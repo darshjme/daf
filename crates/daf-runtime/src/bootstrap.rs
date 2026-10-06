@@ -1,6 +1,6 @@
 //! Bootstrap sequence for the DAF runtime.
 //!
-//! The [`bootstrap`] function is the primary entry point. It walks through
+//! The [`bootstrap()`] function is the primary entry point. It walks through
 //! a deterministic sequence of initialization steps, logging progress and
 //! handling errors with rollback where possible.
 
@@ -75,7 +75,10 @@ fn init_tracing(config: &RuntimeConfig) -> DafResult<()> {
         }
     }
 
-    info!("step 1/9: tracing initialized (level={})", config.logging.level);
+    info!(
+        "step 1/9: tracing initialized (level={})",
+        config.logging.level
+    );
     Ok(())
 }
 
@@ -307,10 +310,7 @@ mod tests {
 
         let runtime = bootstrap(config).await.unwrap();
         assert_eq!(runtime.node().name, "daf-dev");
-        assert_eq!(
-            runtime.state(),
-            crate::runtime::RuntimeState::Initializing
-        );
+        assert_eq!(runtime.state(), crate::runtime::RuntimeState::Initializing);
     }
 
     #[tokio::test]

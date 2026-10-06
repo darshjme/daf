@@ -81,6 +81,14 @@ impl ExecutionProgress {
 // GraphExecutor
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy)]
+struct ExecutionTiming {
+    start: Instant,
+    wave: usize,
+    total: usize,
+    elapsed: Option<Duration>,
+}
+
 /// Executes an `ExecutionGraph` by driving waves of parallel tasks.
 ///
 /// The executor owns the graph (wrapped in `Arc<RwLock>` for shared access
@@ -88,6 +96,8 @@ impl ExecutionProgress {
 pub struct GraphExecutor {
     /// The execution graph, shared with spawned tasks.
     graph: Arc<RwLock<ExecutionGraph>>,
+    execution_lock: tokio::sync::Mutex<()>,
+    timing: RwLock<Option<ExecutionTiming>>,
     /// The function that executes a node's work.
     task_handler: TaskHandler,
     /// Cancellation token for cooperative shutdown.
@@ -111,6 +121,8 @@ impl GraphExecutor {
     pub fn new(graph: ExecutionGraph, task_handler: TaskHandler) -> Self {
         Self {
             graph: Arc::new(RwLock::new(graph)),
+            execution_lock: tokio::sync::Mutex::new(()),
+            timing: RwLock::new(None),
             task_handler,
             cancel_token: CancellationToken::new(),
             max_concurrency: None,
@@ -205,12 +217,15 @@ impl GraphExecutor {
             }
         }
 
+        let timing = *self.timing.read();
         ExecutionProgress {
             nodes_completed: completed,
             nodes_total: total,
-            current_wave: 0, // Updated during execution.
-            total_waves: 0,
-            elapsed: Duration::ZERO,
+            current_wave: timing.map(|t| t.wave).unwrap_or(0),
+            total_waves: timing.map(|t| t.total).unwrap_or(0),
+            elapsed: timing
+                .map(|t| t.elapsed.unwrap_or_else(|| t.start.elapsed()))
+                .unwrap_or_default(),
             nodes_running: running,
             nodes_failed: failed,
             nodes_skipped: skipped,
@@ -224,16 +239,46 @@ impl GraphExecutor {
     /// if the execution failed fatally (timeout, cancellation, etc.).
     #[instrument(skip(self), fields(graph_name))]
     pub async fn execute(&self) -> Result<ExecutionProgress, GraphError> {
+        let _execution_lock = self
+            .execution_lock
+            .try_lock()
+            .map_err(|_| GraphError::InvalidConfiguration("graph is already executing".into()))?;
+        if self.graph.read().edges().any(|edge| {
+            matches!(
+                edge.effective_condition(),
+                crate::edge::EdgeCondition::OnOutput(_)
+            )
+        }) {
+            return Err(GraphError::UnsupportedOutputCondition);
+        }
+        struct Cleanup<'a>(&'a GraphExecutor);
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                self.0.cancel_remaining_nodes();
+                if let Some(timing) = self.0.timing.write().as_mut() {
+                    timing.elapsed = Some(timing.start.elapsed());
+                }
+            }
+        }
+        // Declared before JoinSet: task futures are aborted first on caller drop.
+        let _cleanup = Cleanup(self);
         // Own spawned tasks outside the timed future: dropping a JoinHandle
         // detaches it, whereas timeout must stop and join every active worker.
         let mut tasks = JoinSet::new();
-        let result = if let Some(limit) = self.global_timeout {
-            match tokio::time::timeout(limit, self.execute_inner(&mut tasks)).await {
-                Ok(result) => result,
-                Err(_) => Err(GraphError::GlobalTimeout(limit)),
+        let work = async {
+            if let Some(limit) = self.global_timeout {
+                match tokio::time::timeout(limit, self.execute_inner(&mut tasks)).await {
+                    Ok(result) => result,
+                    Err(_) => Err(GraphError::GlobalTimeout(limit)),
+                }
+            } else {
+                self.execute_inner(&mut tasks).await
             }
-        } else {
-            self.execute_inner(&mut tasks).await
+        };
+        let result = tokio::select! {
+            biased;
+            _ = self.cancel_token.cancelled() => Err(GraphError::Cancelled),
+            result = work => result,
         };
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
@@ -263,11 +308,6 @@ impl GraphExecutor {
             scheduler.plan_waves(&graph)?
         };
 
-        if plan.is_empty() {
-            info!("graph is empty or fully completed, nothing to execute");
-            return Ok(self.progress());
-        }
-
         info!(
             waves = plan.waves.len(),
             nodes = plan.total_nodes(),
@@ -276,12 +316,36 @@ impl GraphExecutor {
             "execution plan ready"
         );
 
+        *self.timing.write() = Some(ExecutionTiming {
+            start,
+            wave: 0,
+            total: plan.waves.len(),
+            elapsed: None,
+        });
         let concurrency_semaphore = self
             .max_concurrency
             .map(|max| Arc::new(Semaphore::new(max)));
 
         // Execute wave by wave.
-        for wave in &plan.waves {
+        let mut wave_number = 0;
+        loop {
+            // Re-plan from actual outcomes: success-only simulation cannot
+            // predict failure recovery branches.
+            let wave = {
+                let mut graph = self.graph.write();
+                graph.skip_impossible_nodes();
+                scheduler.plan_waves(&graph)?.waves.into_iter().next()
+            };
+            let Some(mut wave) = wave else {
+                break;
+            };
+            wave.wave_number = wave_number;
+            *self.timing.write() = Some(ExecutionTiming {
+                start,
+                wave: wave_number,
+                total: plan.waves.len().max(wave_number + 1),
+                elapsed: None,
+            });
             // Check cancellation.
             if self.cancel_token.is_cancelled() {
                 warn!("execution cancelled before wave {}", wave.wave_number);
@@ -407,6 +471,11 @@ impl GraphExecutor {
 
                     // Update node state.
                     let mut g = graph.write();
+                    if g.get_node(node_id)
+                        .is_some_and(|node| node.state == NodeState::Cancelled)
+                    {
+                        return (node_id, Err("cancelled".into()), elapsed);
+                    }
                     match &result {
                         Ok(()) => {
                             let _ = g.mark_complete(node_id, NodeState::Succeeded, Some(elapsed));
@@ -463,6 +532,10 @@ impl GraphExecutor {
             if let Some(ref cb) = self.on_wave_complete {
                 cb(wave.wave_number).await;
             }
+            wave_number += 1;
+        }
+        if self.cancel_token.is_cancelled() {
+            return Err(GraphError::Cancelled);
         }
 
         let elapsed = start.elapsed();
@@ -470,7 +543,14 @@ impl GraphExecutor {
 
         let mut progress = self.progress();
         progress.elapsed = elapsed;
-        progress.total_waves = plan.waves.len();
+        progress.total_waves = wave_number;
+        progress.current_wave = wave_number.saturating_sub(1);
+        *self.timing.write() = Some(ExecutionTiming {
+            start,
+            wave: progress.current_wave,
+            total: wave_number,
+            elapsed: Some(elapsed),
+        });
         Ok(progress)
     }
 
@@ -534,6 +614,162 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancellation_interrupts_hanging_lifecycle_callback() {
+        let mut graph = ExecutionGraph::new("callback-cancellation");
+        graph.add_node(make_task("a"));
+        let token = CancellationToken::new();
+        let executor = GraphExecutor::new(graph, noop_handler())
+            .with_cancel_token(token.clone())
+            .on_node_start(Box::new(|_| Box::pin(std::future::pending())));
+        let cancelling = async {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            token.cancel();
+        };
+        let (result, _) = tokio::join!(executor.execute(), cancelling);
+        assert!(matches!(result, Err(GraphError::Cancelled)));
+        assert_eq!(executor.progress().nodes_completed, 1);
+    }
+
+    #[tokio::test]
+    async fn caller_drop_cancels_nodes_and_rejects_overlapping_execution() {
+        let mut graph = ExecutionGraph::new("caller-drop");
+        graph.add_node(make_task("a"));
+        let handler: TaskHandler = Arc::new(|_| Box::pin(std::future::pending()));
+        let executor = GraphExecutor::new(graph, handler);
+        {
+            let work = executor.execute();
+            tokio::pin!(work);
+            tokio::select! {
+                _ = &mut work => panic!("handler must hang"),
+                _ = tokio::time::sleep(Duration::from_millis(5)) => {}
+            }
+            assert_eq!(executor.progress().nodes_running, 1);
+            assert!(executor.progress().elapsed > Duration::ZERO);
+            assert!(matches!(
+                executor.execute().await,
+                Err(GraphError::InvalidConfiguration(_))
+            ));
+        }
+        assert_eq!(executor.progress().nodes_running, 0);
+        assert_eq!(executor.progress().nodes_completed, 1);
+        assert!(
+            executor
+                .graph()
+                .read()
+                .nodes()
+                .all(|node| node.state == NodeState::Cancelled)
+        );
+    }
+
+    #[tokio::test]
+    async fn failure_routes_recovery_and_always_cleanup() {
+        let mut graph = ExecutionGraph::new("recovery");
+        let failed = graph.add_node(make_task("failed"));
+        let recovery = graph.add_node(make_task("recovery"));
+        let cleanup = graph.add_node(make_task("cleanup"));
+        let success_only = graph.add_node(make_task("success-only"));
+        graph
+            .add_edge(
+                Edge::new(failed, recovery, EdgeKind::Conditional)
+                    .with_condition(crate::edge::EdgeCondition::OnFailure),
+            )
+            .unwrap();
+        graph
+            .add_edge(
+                Edge::new(failed, cleanup, EdgeKind::DependsOn)
+                    .with_condition(crate::edge::EdgeCondition::Always),
+            )
+            .unwrap();
+        graph
+            .add_edge(Edge::new(failed, success_only, EdgeKind::DependsOn))
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let handler: TaskHandler = Arc::new(move |id| {
+            let observed = observed.clone();
+            Box::pin(async move {
+                assert_ne!(id, success_only);
+                observed.fetch_add(1, Ordering::SeqCst);
+                if id == failed {
+                    Err("failed".into())
+                } else {
+                    Ok(())
+                }
+            })
+        });
+        let executor = GraphExecutor::new(graph, handler);
+        let progress = executor.execute().await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!((progress.nodes_completed, progress.nodes_skipped), (4, 1));
+        assert_eq!(
+            executor.graph().read().get_node(recovery).unwrap().state,
+            NodeState::Succeeded
+        );
+        assert_eq!(
+            executor.graph().read().get_node(cleanup).unwrap().state,
+            NodeState::Succeeded
+        );
+    }
+
+    #[tokio::test]
+    async fn success_skips_failure_branch_but_runs_its_cleanup() {
+        let mut graph = ExecutionGraph::new("success-branch");
+        let success = graph.add_node(make_task("success"));
+        let recovery = graph.add_node(make_task("recovery"));
+        let cleanup = graph.add_node(make_task("cleanup"));
+        graph
+            .add_edge(
+                Edge::new(success, recovery, EdgeKind::Conditional)
+                    .with_condition(crate::edge::EdgeCondition::OnFailure),
+            )
+            .unwrap();
+        graph
+            .add_edge(
+                Edge::new(recovery, cleanup, EdgeKind::Conditional)
+                    .with_condition(crate::edge::EdgeCondition::Always),
+            )
+            .unwrap();
+        let executor = GraphExecutor::new(graph, noop_handler());
+        let progress = executor.execute().await.unwrap();
+        assert_eq!((progress.nodes_completed, progress.nodes_skipped), (3, 1));
+        assert_eq!(
+            executor.graph().read().get_node(cleanup).unwrap().state,
+            NodeState::Succeeded
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_output_route_is_rejected_before_work() {
+        let mut graph = ExecutionGraph::new("output");
+        let a = graph.add_node(make_task("a"));
+        let b = graph.add_node(make_task("b"));
+        graph
+            .add_edge(
+                Edge::new(a, b, EdgeKind::Conditional)
+                    .with_condition(crate::edge::EdgeCondition::OnOutput("classified".into())),
+            )
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let executor = GraphExecutor::new(graph, counting_handler(calls.clone()));
+        assert!(matches!(
+            executor.execute().await,
+            Err(GraphError::UnsupportedOutputCondition)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn zero_concurrency_is_rejected() {
+        let mut graph = ExecutionGraph::new("zero");
+        graph.add_node(make_task("a"));
+        let executor = GraphExecutor::new(graph, noop_handler()).with_max_concurrency(0);
+        assert!(matches!(
+            executor.execute().await,
+            Err(GraphError::InvalidConfiguration(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn global_deadline_drops_and_joins_active_wave() {
         let mut graph = ExecutionGraph::new("deadline-wave");
         for name in ["a", "b", "c"] {
@@ -572,11 +808,13 @@ mod tests {
             2,
             "must join cleanup before returning"
         );
-        assert!(executor
-            .graph()
-            .read()
-            .nodes()
-            .all(|n| n.state == NodeState::Cancelled));
+        assert!(
+            executor
+                .graph()
+                .read()
+                .nodes()
+                .all(|n| n.state == NodeState::Cancelled)
+        );
     }
 
     #[tokio::test]
@@ -767,7 +1005,10 @@ mod tests {
             })
         });
         let executor = GraphExecutor::new(graph, handler).with_cancel_token(token);
-        executor.execute().await.unwrap();
+        assert!(matches!(
+            executor.execute().await,
+            Err(GraphError::Cancelled)
+        ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             executor.graph().read().get_node(a).unwrap().state,

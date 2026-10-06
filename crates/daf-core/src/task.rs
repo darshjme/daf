@@ -429,11 +429,8 @@ impl TaskHandle {
 
     /// Duration since the task was dispatched, or `None` if not yet dispatched.
     pub fn elapsed(&self) -> Option<Duration> {
-        self.dispatched_at.map(|t| {
-            (Utc::now() - t)
-                .to_std()
-                .unwrap_or(Duration::ZERO)
-        })
+        self.dispatched_at
+            .map(|t| (Utc::now() - t).to_std().unwrap_or(Duration::ZERO))
     }
 }
 
@@ -541,8 +538,7 @@ mod tests {
 
     #[test]
     fn task_spec_serde_roundtrip() {
-        let spec = TaskSpec::new("test", "A test task")
-            .with_inputs(serde_json::json!({"x": 1}));
+        let spec = TaskSpec::new("test", "A test task").with_inputs(serde_json::json!({"x": 1}));
         let json = serde_json::to_string(&spec).unwrap();
         let back: TaskSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(back.name, "test");

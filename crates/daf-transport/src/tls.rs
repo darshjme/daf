@@ -204,9 +204,18 @@ pub struct TlsTransport {
 impl TlsTransport {
     /// Build a TLS transport from the given configuration.
     ///
-    /// Loads certificates and keys eagerly so that misconfiguration is
-    /// caught at construction time rather than at the first handshake.
+    /// Validates policy eagerly; certificates are loaded by init_server/init_client.
     pub fn new(config: TlsConfig) -> TransportResult<Self> {
+        if config.verify_peer && config.ca_path.is_none() {
+            return Err(TransportError::TlsError {
+                message: "mutual TLS requires a CA certificate".into(),
+            });
+        }
+        if config.handshake_timeout.is_zero() {
+            return Err(TransportError::TlsError {
+                message: "TLS handshake timeout must be positive".into(),
+            });
+        }
         Ok(Self {
             config,
             acceptor: None,
@@ -221,12 +230,36 @@ impl TlsTransport {
         let certs = load_certs(&self.config.cert_path)?;
         let key = load_key(&self.config.key_path)?;
 
-        let server_config = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(certs, key)
-            .map_err(|e| TransportError::TlsError {
-                message: format!("server config error: {e}"),
-            })?;
+        let builder = rustls::ServerConfig::builder();
+        let builder = if self.config.verify_peer {
+            let mut roots = rustls::RootCertStore::empty();
+            let ca_path =
+                self.config
+                    .ca_path
+                    .as_deref()
+                    .ok_or_else(|| TransportError::TlsError {
+                        message: "mutual TLS requires a CA certificate".into(),
+                    })?;
+            for cert in load_certs(ca_path)? {
+                roots.add(cert).map_err(|e| TransportError::TlsError {
+                    message: format!("invalid CA certificate: {e}"),
+                })?;
+            }
+            let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+                .build()
+                .map_err(|e| TransportError::TlsError {
+                    message: format!("client verifier error: {e}"),
+                })?;
+            builder.with_client_cert_verifier(verifier)
+        } else {
+            builder.with_no_client_auth()
+        };
+        let server_config =
+            builder
+                .with_single_cert(certs, key)
+                .map_err(|e| TransportError::TlsError {
+                    message: format!("server config error: {e}"),
+                })?;
 
         self.acceptor = Some(TlsAcceptor::from(Arc::new(server_config)));
         tracing::info!("TLS server acceptor initialized");
@@ -248,9 +281,19 @@ impl TlsTransport {
             }
         }
 
-        let client_config = rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
+        let builder = rustls::ClientConfig::builder().with_root_certificates(root_store);
+        let client_config = if self.config.verify_peer {
+            builder
+                .with_client_auth_cert(
+                    load_certs(&self.config.cert_path)?,
+                    load_key(&self.config.key_path)?,
+                )
+                .map_err(|e| TransportError::TlsError {
+                    message: format!("client certificate error: {e}"),
+                })?
+        } else {
+            builder.with_no_client_auth()
+        };
 
         self.connector = Some(TlsConnector::from(Arc::new(client_config)));
         tracing::info!("TLS client connector initialized");
@@ -262,27 +305,28 @@ impl TlsTransport {
         &self,
         tcp_stream: tokio::net::TcpStream,
     ) -> TransportResult<TlsConnection> {
-        let acceptor = self.acceptor.as_ref().ok_or_else(|| TransportError::TlsError {
-            message: "server acceptor not initialized; call init_server() first".into(),
-        })?;
+        let acceptor = self
+            .acceptor
+            .as_ref()
+            .ok_or_else(|| TransportError::TlsError {
+                message: "server acceptor not initialized; call init_server() first".into(),
+            })?;
 
         let peer = tcp_stream
             .peer_addr()
             .map(|a| a.to_string())
             .unwrap_or_else(|_| "unknown".into());
 
-        let tls_stream = tokio::time::timeout(
-            self.config.handshake_timeout,
-            acceptor.accept(tcp_stream),
-        )
-        .await
-        .map_err(|_| TransportError::Timeout {
-            operation: "TLS server handshake".into(),
-            duration: self.config.handshake_timeout,
-        })?
-        .map_err(|e| TransportError::TlsError {
-            message: format!("server handshake failed: {e}"),
-        })?;
+        let tls_stream =
+            tokio::time::timeout(self.config.handshake_timeout, acceptor.accept(tcp_stream))
+                .await
+                .map_err(|_| TransportError::Timeout {
+                    operation: "TLS server handshake".into(),
+                    duration: self.config.handshake_timeout,
+                })?
+                .map_err(|e| TransportError::TlsError {
+                    message: format!("server handshake failed: {e}"),
+                })?;
 
         let mut info = ConnectionInfo::new(Some(peer));
         info.state = ConnectionState::Connected;
@@ -296,26 +340,32 @@ impl TlsTransport {
 
     /// Connect to a remote TLS server over TCP (client side).
     pub async fn connect_tls(&self, addr: &str) -> TransportResult<TlsConnection> {
-        let connector = self.connector.as_ref().ok_or_else(|| TransportError::TlsError {
-            message: "client connector not initialized; call init_client() first".into(),
-        })?;
-
-        let tcp_stream = tokio::net::TcpStream::connect(addr)
-            .await
-            .map_err(|e| match e.kind() {
-                std::io::ErrorKind::ConnectionRefused => TransportError::ConnectionRefused {
-                    address: addr.to_string(),
-                },
-                _ => TransportError::IoError(e),
+        let connector = self
+            .connector
+            .as_ref()
+            .ok_or_else(|| TransportError::TlsError {
+                message: "client connector not initialized; call init_client() first".into(),
             })?;
+
+        let tcp_stream = tokio::time::timeout(
+            self.config.handshake_timeout,
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await
+        .map_err(|_| TransportError::Timeout {
+            operation: format!("TLS TCP connect to {addr}"),
+            duration: self.config.handshake_timeout,
+        })?
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::ConnectionRefused => TransportError::ConnectionRefused {
+                address: addr.to_string(),
+            },
+            _ => TransportError::IoError(e),
+        })?;
 
         tcp_stream.set_nodelay(true)?;
 
-        let server_name = self
-            .config
-            .server_name
-            .as_deref()
-            .unwrap_or("localhost");
+        let server_name = self.config.server_name.as_deref().unwrap_or("localhost");
 
         let domain = ServerName::try_from(server_name.to_string()).map_err(|e| {
             TransportError::TlsError {
@@ -355,6 +405,71 @@ impl TlsTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture_config() -> TlsConfig {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        TlsConfig::new(
+            root.join("test.pem").to_string_lossy(),
+            root.join("test.key").to_string_lossy(),
+        )
+        .with_ca(root.join("ca.pem").to_string_lossy())
+        .with_server_name("localhost")
+    }
+
+    #[tokio::test]
+    async fn mutual_tls_authenticates_both_peers_and_transfers_data() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut server = TlsTransport::new(fixture_config()).unwrap();
+        server.init_server().unwrap();
+        let serving = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut conn = server.accept_tls(tcp).await.unwrap();
+            conn.write(b"authenticated").await.unwrap();
+            conn.flush().await.unwrap();
+        });
+        let mut client = TlsTransport::new(fixture_config()).unwrap();
+        client.init_client().unwrap();
+        let mut conn = client.connect_tls(&addr.to_string()).await.unwrap();
+        let mut data = [0; 32];
+        let size = conn.read(&mut data).await.unwrap();
+        assert_eq!(&data[..size], b"authenticated");
+        serving.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mutual_tls_rejects_client_without_certificate() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut server = TlsTransport::new(fixture_config()).unwrap();
+        server.init_server().unwrap();
+        let serving = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            assert!(
+                server.accept_tls(tcp).await.is_err(),
+                "anonymous peer must fail server authentication"
+            );
+        });
+        let mut config = fixture_config();
+        config.verify_peer = false; // Trust the server CA, but offer no client certificate.
+        let mut client = TlsTransport::new(config).unwrap();
+        client.init_client().unwrap();
+        if let Ok(mut conn) = client.connect_tls(&addr.to_string()).await {
+            let mut data = [0; 8];
+            assert!(conn.read(&mut data).await.is_err());
+        }
+        serving.await.unwrap();
+    }
+
+    #[test]
+    fn mutual_tls_without_trust_anchor_fails_closed() {
+        let mut config = TlsConfig::new("unused", "unused");
+        config.verify_peer = true;
+        assert!(matches!(
+            TlsTransport::new(config),
+            Err(TransportError::TlsError { .. })
+        ));
+    }
 
     #[test]
     fn tls_config_builder() {

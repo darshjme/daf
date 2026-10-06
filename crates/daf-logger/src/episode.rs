@@ -264,8 +264,8 @@ impl EpisodeRecorder {
                 other => other.to_string(),
             };
 
-            let event = EpisodeEvent::new(entry.source_agent, event_type, text)
-                .with_source(entry.id);
+            let event =
+                EpisodeEvent::new(entry.source_agent, event_type, text).with_source(entry.id);
             ep.record_event(event);
         }
 
@@ -322,12 +322,7 @@ impl EpisodeRecorder {
             text.clone()
         };
 
-        let ep = Episode::new(
-            title,
-            text,
-            self.conversation_id,
-            vec![entry.source_agent],
-        );
+        let ep = Episode::new(title, text, self.conversation_id, vec![entry.source_agent]);
         self.current_episode = Some(ep);
     }
 }
@@ -337,13 +332,22 @@ impl EpisodeRecorder {
 fn classify_entry(entry: &LogEntry) -> EpisodeEventType {
     let tags_lower: Vec<String> = entry.tags.iter().map(|t| t.to_lowercase()).collect();
 
-    if tags_lower.iter().any(|t| t.contains("decision") || t.contains("chose")) {
+    if tags_lower
+        .iter()
+        .any(|t| t.contains("decision") || t.contains("chose"))
+    {
         return EpisodeEventType::Decision;
     }
-    if tags_lower.iter().any(|t| t.contains("action") || t.contains("tool") || t.contains("execute")) {
+    if tags_lower
+        .iter()
+        .any(|t| t.contains("action") || t.contains("tool") || t.contains("execute"))
+    {
         return EpisodeEventType::Action;
     }
-    if tags_lower.iter().any(|t| t.contains("observe") || t.contains("read") || t.contains("result")) {
+    if tags_lower
+        .iter()
+        .any(|t| t.contains("observe") || t.contains("read") || t.contains("result"))
+    {
         return EpisodeEventType::Observation;
     }
 
@@ -384,7 +388,13 @@ mod tests {
         for i in 0..n {
             let src = if i % 2 == 0 { a } else { b };
             let tgt = if i % 2 == 0 { b } else { a };
-            entries.push(LogEntry::text(src, tgt, conv_id, i as u64, &format!("msg {i}")));
+            entries.push(LogEntry::text(
+                src,
+                tgt,
+                conv_id,
+                i as u64,
+                &format!("msg {i}"),
+            ));
         }
 
         (conv_id, a, b, entries)
@@ -412,13 +422,10 @@ mod tests {
 
         let mut recorder = EpisodeRecorder::new(conv_id);
 
-        let e1 = LogEntry::text(a, b, conv_id, 0, "start task 1")
-            .with_tag("episode:start");
+        let e1 = LogEntry::text(a, b, conv_id, 0, "start task 1").with_tag("episode:start");
         let e2 = LogEntry::text(b, a, conv_id, 1, "working on task 1");
-        let e3 = LogEntry::text(a, b, conv_id, 2, "done with task 1")
-            .with_tag("episode:end");
-        let e4 = LogEntry::text(b, a, conv_id, 3, "start task 2")
-            .with_tag("episode:start");
+        let e3 = LogEntry::text(a, b, conv_id, 2, "done with task 1").with_tag("episode:end");
+        let e4 = LogEntry::text(b, a, conv_id, 3, "start task 2").with_tag("episode:start");
         let e5 = LogEntry::text(a, b, conv_id, 4, "working on task 2");
 
         for e in [&e1, &e2, &e3, &e4, &e5] {

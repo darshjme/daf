@@ -88,7 +88,10 @@ impl RuntimeConfig {
     /// Load configuration from a YAML file at the given path.
     pub fn from_yaml(path: &std::path::Path) -> DafResult<Self> {
         let content = std::fs::read_to_string(path).map_err(|e| {
-            DafError::ConfigError(format!("failed to read config file {}: {e}", path.display()))
+            DafError::ConfigError(format!(
+                "failed to read config file {}: {e}",
+                path.display()
+            ))
         })?;
         let config: Self = serde_yaml_ng::from_str(&content).map_err(|e| {
             DafError::ConfigError(format!(
@@ -437,7 +440,9 @@ mod tests {
     #[test]
     fn development_config_is_valid() {
         let config = RuntimeConfig::development();
-        config.validate().expect("development config should be valid");
+        config
+            .validate()
+            .expect("development config should be valid");
     }
 
     #[test]

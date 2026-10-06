@@ -15,11 +15,14 @@ use uuid::Uuid;
 // ---------------------------------------------------------------------------
 
 /// Severity / verbosity level for a log entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
     Trace,
     Debug,
+    #[default]
     Info,
     Warn,
     Error,
@@ -37,32 +40,21 @@ impl std::fmt::Display for LogLevel {
     }
 }
 
-impl Default for LogLevel {
-    fn default() -> Self {
-        Self::Info
-    }
-}
-
 // ---------------------------------------------------------------------------
 // ContentType
 // ---------------------------------------------------------------------------
 
 /// Discriminator for the `content` field of a [`LogEntry`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ContentType {
     /// UTF-8 text (chat messages, prompts, completions).
+    #[default]
     Text,
     /// Opaque binary blob (base64-encoded when serialized to JSON).
     Binary,
     /// Arbitrary structured JSON value.
     Structured,
-}
-
-impl Default for ContentType {
-    fn default() -> Self {
-        Self::Text
-    }
 }
 
 // ---------------------------------------------------------------------------

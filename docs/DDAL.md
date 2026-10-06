@@ -1,185 +1,79 @@
-# DDAL Protocol Specification
+# DDAL wire protocol — 0.1.0
 
-> Distributed Dialog Abstraction Layer — a binary, conversation-native protocol for low-latency agent communication.
+DDAL is DAF's binary framing and conversation-support library. The authoritative wire definition is [`protocol.rs`](../crates/daf-ddal/src/protocol.rs); the incremental Tokio adapter is [`codec.rs`](../crates/daf-ddal/src/codec.rs). This document describes current code, not a proposed protocol.
 
-## Overview
+## Frame layout
 
-DDAL is the wire protocol that DAF agents use to communicate. It treats conversations as first-class protocol primitives, not bolted-on metadata. Every frame carries conversation context — turn IDs, episode references, and channel information — so agents can maintain coherent multi-turn dialogues across network boundaries.
+All integer fields use network byte order. The fixed header is **21 bytes**.
 
-DDAL is not HTTP. It is not gRPC. It is purpose-built for the unique requirements of agent-to-agent communication where conversations are the fundamental unit of work.
+| Offset | Bytes | Field |
+| :--- | ---: | :--- |
+| 0 | 4 | Magic: `DA F0 DD A1` |
+| 4 | 1 | Major version |
+| 5 | 1 | Minor version |
+| 6 | 1 | Patch version |
+| 7 | 1 | Frame type |
+| 8 | 4 | Stream ID |
+| 12 | 4 | Payload length |
+| 16 | 1 | Flags |
+| 17 | 4 | Truncated BLAKE3 checksum of header bytes 0–16 followed by payload |
+| 21 | N | Payload, at most 16 MiB |
 
-## Design Goals
+Current protocol version is `0.1.0`. Receivers check compatibility according to `ProtocolVersion::is_compatible_with`. The codec can impose a smaller maximum frame size. Encode checks actual payload length, declared length and checksum; malformed fields do not bypass the limit.
 
-| Goal | Target |
-|------|--------|
-| Per-message overhead | < 100 us encode + decode |
-| Multiplexed channels | Unlimited logical channels per connection |
-| Conversation tracking | Native turn/episode/thread identifiers in every frame |
-| Backpressure | Flow control per channel, not per connection |
-| Transport agnostic | TCP, Unix sockets, TLS, in-process channels |
-| Zero-copy friendly | Frame layout supports zero-copy deserialization |
+| Type | Value |
+| :--- | :--- |
+| Handshake | `0x01` |
+| Data | `0x02` |
+| Ack | `0x03` |
+| Nack | `0x04` |
+| Ping | `0x05` |
+| Pong | `0x06` |
+| Route | `0x07` |
+| Subscribe | `0x08` |
+| Unsubscribe | `0x09` |
+| Close | `0x0A` |
 
-## Frame Format
+Conversation UUIDs, turns and episode context are application/payload data. They are **not fixed frame-header fields**. A checksum is not a cryptographic identity check, signature or encryption layer.
 
-Every DDAL message is wrapped in a frame. The frame header is fixed at 24 bytes, followed by a variable-length payload.
+## Incremental framing
 
-```
- 0                   1                   2                   3
- 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|    Version    |     Type      |           Flags               |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                        Channel ID                             |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                        Sequence Number                        |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                      Conversation ID                          |
-|                        (8 bytes)                              |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                       Payload Length                           |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                                                               |
-|                         Payload                               |
-|                          ...                                  |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-```
+`DdalCodec` decodes partial input through `tokio_util::codec`. Incomplete input waits for more bytes; invalid/oversized input returns an error. Applications must bound connections and deadlines as well as frames. Flags express metadata; setting a compression or fragmentation flag does not perform compression or reassembly automatically.
 
-### Field Descriptions
+Invalid frame types and incompatible versions reject at header admission. An advertised payload length does not trigger allocation of the whole payload; buffering grows with received bytes. Raw serialization allocates from the actual payload, and codec encoding checks the declared length against it.
 
-| Field | Size | Description |
-|-------|------|-------------|
-| Version | 1 byte | Protocol version. Currently `0x01`. |
-| Type | 1 byte | Frame type (see below). |
-| Flags | 2 bytes | Bitfield. Bit 0: compressed. Bit 1: encrypted. Bit 2: final frame in turn. |
-| Channel ID | 4 bytes | Logical channel within the connection. |
-| Sequence Number | 4 bytes | Monotonically increasing per channel. |
-| Conversation ID | 8 bytes | UUID v7 truncated to 8 bytes. Links frames to a conversation. |
-| Payload Length | 4 bytes | Length of the payload in bytes. Max 16 MiB. |
-| Payload | Variable | Serialized message content. |
+Payload helpers serialize Bincode, MessagePack and JSON. `detect_format` is a heuristic; applications should use an explicitly agreed format. The generic `Raw` helper currently uses Bincode; callers requiring truly raw bytes should supply `Bytes` directly as the frame payload.
 
-## Frame Types
+## Connection handshake
 
-| Type | Value | Direction | Description |
-|------|-------|-----------|-------------|
-| `HANDSHAKE` | `0x01` | Both | Connection initialization and capability negotiation |
-| `HANDSHAKE_ACK` | `0x02` | Both | Handshake acknowledgment with selected capabilities |
-| `MESSAGE` | `0x10` | Both | A conversation turn (the primary data frame) |
-| `MESSAGE_ACK` | `0x11` | Both | Acknowledgment of a received message |
-| `STREAM_START` | `0x20` | Sender | Begin a streaming response |
-| `STREAM_CHUNK` | `0x21` | Sender | A chunk within a streaming response |
-| `STREAM_END` | `0x22` | Sender | End of streaming response |
-| `CHANNEL_OPEN` | `0x30` | Both | Open a new logical channel |
-| `CHANNEL_CLOSE` | `0x31` | Both | Close a logical channel |
-| `FLOW_CONTROL` | `0x40` | Both | Window update for backpressure |
-| `PING` | `0xF0` | Both | Keepalive |
-| `PONG` | `0xF1` | Both | Keepalive response |
-| `ERROR` | `0xFF` | Both | Protocol-level error |
-
-## Handshake Sequence
+The handshake helpers use a separate **four-byte length-prefixed Bincode message**, rather than `DdalCodec` framing. Choose one connection setup contract and use it consistently.
 
 ```mermaid
 sequenceDiagram
-    participant A as Agent A
-    participant B as Agent B
-
-    A->>B: HANDSHAKE (version, capabilities, agent_id)
-    B->>A: HANDSHAKE_ACK (selected_capabilities, agent_id)
-    A->>B: CHANNEL_OPEN (channel_id=1, purpose="conversation")
-    B->>A: CHANNEL_OPEN ACK
-    Note over A,B: Connection established. Conversation frames flow on channel 1.
-    A->>B: MESSAGE (turn_id=1, role=user, content=...)
-    B->>A: STREAM_START (turn_id=2, role=assistant)
-    B->>A: STREAM_CHUNK (partial content...)
-    B->>A: STREAM_CHUNK (partial content...)
-    B->>A: STREAM_END (final)
-    A->>B: MESSAGE_ACK (turn_id=2)
+  participant C as Client
+  participant S as Server application
+  C->>S: perform_handshake_client(request)
+  S->>S: perform_handshake_server returns request
+  S->>S: Validate identity, version and authorization
+  S->>C: complete_handshake_server(accept or reject)
+  Note over C,S: Accepted stream can then carry DDAL frames
 ```
 
-### Capability Negotiation
+`perform_handshake_server` returns a `HandshakeRequest` directly. Earlier releases returned a oneshot sender with no live receiver; that broken API has been replaced. Call `complete_handshake_server` after making the decision. Applications must enforce timeout and authentication themselves; the optional token field does not implement a verifier.
 
-During handshake, each side advertises its capabilities as a bitfield:
+## Channels and transport
 
-| Bit | Capability | Description |
-|-----|------------|-------------|
-| 0 | `COMPRESSION` | Supports zstd payload compression |
-| 1 | `ENCRYPTION` | Supports envelope-encrypted payloads |
-| 2 | `STREAMING` | Supports streaming responses |
-| 3 | `MULTIPLEXING` | Supports multiple logical channels |
-| 4 | `CONVERSATION_RESUME` | Can resume conversations from a given turn |
+`ChannelPool` bounds logical channel count and queue capacity. A transport pump must take a channel's outbound receiver and deliver incoming frames through its writer. Opening a channel does not automatically create a network connection or task pump. Close releases capacity, wakes blocked queue sends and prevents stale cloned writers from sending. Claimed receivers drain queued frames and then reach EOF, including when the pool is dropped. Applications must manage the network pump lifecycle.
 
-The responder selects the intersection of both sides' capabilities.
+TCP provides ordered bytes and can still have head-of-line blocking across multiplexed logical streams. DDAL does not establish exactly-once delivery, durable acknowledgement, reconnection replay or cross-node consensus. Define these at the application layer before advertising them.
 
-## Channel Multiplexing
+`daf-transport` provides TCP, Unix, in-process and rustls TLS components. Mutual TLS requires a CA and peer verification configuration; plain TCP is available and must not carry production secrets. The runtime does not automatically provide certificate management or authenticate every agent connection.
 
-A single DDAL connection supports multiple logical channels. Each channel has:
+## Verification
 
-- An independent sequence number space
-- Independent flow control windows
-- A designated purpose (conversation, control, telemetry)
+```sh
+cargo test --locked -p daf-ddal -p daf-transport
+cargo test --locked -p daf-integration-tests --test remote_pipeline
+```
 
-This allows an agent to maintain multiple concurrent conversations over a single TCP connection without head-of-line blocking between conversations.
-
-### Channel Lifecycle
-
-1. Either side sends `CHANNEL_OPEN` with a proposed channel ID and purpose.
-2. The other side acknowledges or rejects.
-3. Messages flow on the channel with per-channel sequence numbers.
-4. Either side can send `CHANNEL_CLOSE` to tear down the channel.
-5. Channel IDs are not reused within a connection.
-
-## Conversation Tracking
-
-DDAL treats conversations as a core protocol concept. Every `MESSAGE` frame carries:
-
-- **Conversation ID** — in the frame header. Groups all turns belonging to the same conversation.
-- **Turn ID** — in the payload. Monotonically increasing within a conversation.
-- **Parent Turn ID** — optional. For branching conversations (e.g., tool calls that spawn sub-conversations).
-- **Episode ID** — optional. Links the conversation to a memory episode for recording.
-- **Role** — `user`, `assistant`, `system`, `tool`.
-
-This means conversation context is never lost at the protocol level, even when messages are routed through intermediary agents or load balancers.
-
-## Serialization
-
-The payload within a DDAL frame can use different serialization formats. The format is negotiated during handshake.
-
-| Format | Use Case | Throughput | Human Readable | Size |
-|--------|----------|------------|----------------|------|
-| **bincode** | Default. Agent-to-agent. | ~2.5 GB/s encode | No | Smallest |
-| **MessagePack** | Cross-language interop. | ~800 MB/s encode | No | Small |
-| **JSON** | Debugging, external APIs. | ~200 MB/s encode | Yes | Largest |
-
-DAF defaults to bincode for internal agent communication and MessagePack for cross-language scenarios. JSON is available for debugging and integration with external systems that expect it.
-
-## Error Recovery
-
-DDAL includes several strategies for handling failures:
-
-### Connection-Level Recovery
-
-- **Keepalives**: `PING`/`PONG` frames detect dead connections. Default interval: 15 seconds. Miss 3 in a row and the connection is considered dead.
-- **Reconnection**: Agents attempt exponential backoff reconnection (1s, 2s, 4s, 8s, max 60s).
-- **Conversation Resume**: If both sides support `CONVERSATION_RESUME`, the reconnecting agent sends the last known turn ID. The other side replays any turns after that point.
-
-### Message-Level Recovery
-
-- **Sequence Gaps**: If a receiver detects a gap in sequence numbers, it sends an `ERROR` frame requesting retransmission.
-- **Acknowledgments**: `MESSAGE_ACK` frames confirm receipt. Unacknowledged messages are retransmitted after a timeout (default: 5 seconds).
-- **Idempotency**: Messages carry sequence numbers. Duplicate deliveries are detected and deduplicated by the receiver.
-
-### Channel-Level Recovery
-
-- **Flow Control**: Each channel has a receive window. When the window is exhausted, the sender pauses until the receiver sends a `FLOW_CONTROL` update.
-- **Channel Reset**: If a channel enters an inconsistent state, either side can close and reopen it without affecting other channels.
-
-## Implementation
-
-The DDAL codec lives in `crates/daf-ddal/`. Key modules:
-
-- `frame.rs` — Frame encoding and decoding
-- `codec.rs` — Tokio codec implementation for async I/O
-- `channel.rs` — Channel multiplexing state machine
-- `handshake.rs` — Connection handshake logic
-- `conversation.rs` — Conversation tracking within the protocol layer
-
-See also the FlatBuffers schema at `proto/ddal.fbs` for the canonical message definitions.
+The remote pipeline test uses a local deterministic fixture. It proves the named integration steps, not distributed production readiness or model quality. See [STANDARD.md](STANDARD.md) for delivery and security acceptance gates.

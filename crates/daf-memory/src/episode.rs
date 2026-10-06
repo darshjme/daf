@@ -334,11 +334,7 @@ impl EpisodeIndex {
     }
 
     /// Find episodes within a time range.
-    pub fn by_time_range(
-        &self,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
-    ) -> Vec<&Episode> {
+    pub fn by_time_range(&self, start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<&Episode> {
         self.episodes
             .iter()
             .filter(|ep| ep.start_time >= start && ep.start_time <= end)
@@ -496,12 +492,10 @@ mod tests {
         let mut ep = Episode::new("deploy service");
 
         ep.record_event(
-            EpisodeEvent::new(agent, "start_deploy")
-                .with_observation("deploying to staging")
+            EpisodeEvent::new(agent, "start_deploy").with_observation("deploying to staging"),
         );
         ep.record_event(
-            EpisodeEvent::new(agent, "verify_health")
-                .with_observation("health check passed")
+            EpisodeEvent::new(agent, "verify_health").with_observation("health check passed"),
         );
 
         assert_eq!(ep.event_count(), 2);
@@ -549,10 +543,7 @@ mod tests {
         assert_eq!(idx.by_agent(&agent1).len(), 1);
         assert_eq!(idx.by_tag("deploy").len(), 1);
         assert_eq!(idx.by_importance_threshold(0.5).len(), 1);
-        assert_eq!(
-            idx.by_outcome(&EpisodeOutcome::Success).len(),
-            1
-        );
+        assert_eq!(idx.by_outcome(&EpisodeOutcome::Success).len(), 1);
     }
 
     #[test]

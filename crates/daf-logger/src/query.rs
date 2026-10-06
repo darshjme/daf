@@ -342,9 +342,7 @@ mod tests {
     #[test]
     fn query_content_search() {
         let (_, _, _, entries) = sample_entries();
-        let result = LogQuery::new()
-            .by_content_search("error")
-            .execute(&entries);
+        let result = LogQuery::new().by_content_search("error").execute(&entries);
         assert_eq!(result.total, 1);
         assert_eq!(result.items[0].turn_number, 2);
     }
@@ -393,7 +391,11 @@ mod tests {
         let counts = count_by_level(&entries);
         let info = counts.iter().find(|(l, _)| *l == LogLevel::Info).unwrap().1;
         let warn = counts.iter().find(|(l, _)| *l == LogLevel::Warn).unwrap().1;
-        let error = counts.iter().find(|(l, _)| *l == LogLevel::Error).unwrap().1;
+        let error = counts
+            .iter()
+            .find(|(l, _)| *l == LogLevel::Error)
+            .unwrap()
+            .1;
         assert_eq!(info, 3);
         assert_eq!(warn, 1);
         assert_eq!(error, 1);

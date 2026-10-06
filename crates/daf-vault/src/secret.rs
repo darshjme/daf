@@ -124,10 +124,11 @@ impl fmt::Display for AgentKind {
 /// Evaluated at read time by the vault store. The `AnyAgent` policy is
 /// intentionally permissive — use it only for non-sensitive configuration
 /// values.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AccessPolicy {
     /// Any authenticated agent may read this secret.
+    #[default]
     AnyAgent,
     /// Only the listed agents may read this secret.
     SpecificAgents(Vec<AgentId>),
@@ -135,12 +136,6 @@ pub enum AccessPolicy {
     ByCapability(String),
     /// Any agent of the given kind may read this secret.
     ByKind(AgentKind),
-}
-
-impl Default for AccessPolicy {
-    fn default() -> Self {
-        Self::AnyAgent
-    }
 }
 
 impl AccessPolicy {
@@ -175,7 +170,7 @@ impl AccessPolicy {
 /// The `encrypted_value` field holds the ciphertext produced by the data key
 /// associated with this secret. The plaintext is never held in this struct
 /// beyond the initial encryption call.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Secret {
     /// Unique identifier.
     pub id: SecretId,
@@ -199,16 +194,24 @@ pub struct Secret {
     pub access_policy: AccessPolicy,
 }
 
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Secret")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("version", &self.version)
+            .field("encrypted_value", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
 impl Secret {
     /// Create a new secret with the given plaintext already encrypted.
     ///
     /// The caller is responsible for encrypting `value` before passing it
     /// here — this constructor stores whatever bytes it receives.
-    pub fn new(
-        name: impl Into<String>,
-        kind: SecretKind,
-        encrypted_value: Vec<u8>,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, kind: SecretKind, encrypted_value: Vec<u8>) -> Self {
         Self {
             id: SecretId::new(),
             kind,
@@ -243,9 +246,7 @@ impl Secret {
 
     /// Returns `true` if the secret has expired as of `now`.
     pub fn is_expired(&self) -> bool {
-        self.expires_at
-            .map(|exp| Utc::now() > exp)
-            .unwrap_or(false)
+        self.expires_at.map(|exp| Utc::now() > exp).unwrap_or(false)
     }
 
     /// Produce a lightweight reference to this secret (no value).
@@ -312,7 +313,10 @@ mod tests {
     #[test]
     fn secret_kind_display() {
         assert_eq!(SecretKind::ApiKey.to_string(), "api_key");
-        assert_eq!(SecretKind::Custom("webhook".into()).to_string(), "custom:webhook");
+        assert_eq!(
+            SecretKind::Custom("webhook".into()).to_string(),
+            "custom:webhook"
+        );
     }
 
     #[test]
@@ -370,6 +374,17 @@ mod tests {
         assert_eq!(r.name, "api_key");
         assert_eq!(r.version, 1);
         // SecretRef has no encrypted_value field — compile-time proof it's safe to log.
+    }
+
+    #[test]
+    fn debug_redacts_plaintext_and_metadata() {
+        let secret = Secret::new("key", SecretKind::Token, b"sensitive-value".to_vec())
+            .with_metadata("credential", "metadata-secret");
+        let rendered = format!("{secret:?}");
+        assert!(rendered.contains("[REDACTED]"));
+        assert!(!rendered.contains("sensitive-value"));
+        assert!(!rendered.contains("metadata-secret"));
+        assert!(!rendered.contains("115, 101, 110"));
     }
 
     #[test]

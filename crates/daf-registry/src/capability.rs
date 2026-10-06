@@ -36,11 +36,7 @@ pub struct Capability {
 
 impl Capability {
     /// Create a new capability with no parameters.
-    pub fn new(
-        name: impl Into<String>,
-        version: SemVer,
-        description: impl Into<String>,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, version: SemVer, description: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             version,
@@ -123,7 +119,11 @@ impl CapabilityRequirement {
 
 impl fmt::Display for CapabilityRequirement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let tag = if self.required { "required" } else { "optional" };
+        let tag = if self.required {
+            "required"
+        } else {
+            "optional"
+        };
         write!(f, "{}({} {})", tag, self.name, self.version_constraint)
     }
 }
@@ -384,21 +384,24 @@ mod tests {
     #[test]
     fn capability_matches_requirement() {
         let c = cap("lint", "1.2.0");
-        let req = CapabilityRequirement::required("lint", VersionConstraint::parse("^1.0.0").unwrap());
+        let req =
+            CapabilityRequirement::required("lint", VersionConstraint::parse("^1.0.0").unwrap());
         assert!(c.matches(&req));
     }
 
     #[test]
     fn capability_does_not_match_wrong_name() {
         let c = cap("lint", "1.2.0");
-        let req = CapabilityRequirement::required("deploy", VersionConstraint::parse("^1.0.0").unwrap());
+        let req =
+            CapabilityRequirement::required("deploy", VersionConstraint::parse("^1.0.0").unwrap());
         assert!(!c.matches(&req));
     }
 
     #[test]
     fn capability_does_not_match_wrong_version() {
         let c = cap("lint", "0.9.0");
-        let req = CapabilityRequirement::required("lint", VersionConstraint::parse(">=1.0.0").unwrap());
+        let req =
+            CapabilityRequirement::required("lint", VersionConstraint::parse(">=1.0.0").unwrap());
         assert!(!c.matches(&req));
     }
 
@@ -417,14 +420,9 @@ mod tests {
 
     #[test]
     fn capability_set_intersection() {
-        let a = CapabilitySet::from_capabilities(vec![
-            cap("lint", "1.0.0"),
-            cap("deploy", "1.0.0"),
-        ]);
-        let b = CapabilitySet::from_capabilities(vec![
-            cap("lint", "2.0.0"),
-            cap("test", "1.0.0"),
-        ]);
+        let a =
+            CapabilitySet::from_capabilities(vec![cap("lint", "1.0.0"), cap("deploy", "1.0.0")]);
+        let b = CapabilitySet::from_capabilities(vec![cap("lint", "2.0.0"), cap("test", "1.0.0")]);
 
         let inter = a.intersection(&b);
         assert_eq!(inter.len(), 1);
@@ -444,10 +442,8 @@ mod tests {
 
     #[test]
     fn capability_set_difference() {
-        let a = CapabilitySet::from_capabilities(vec![
-            cap("lint", "1.0.0"),
-            cap("deploy", "1.0.0"),
-        ]);
+        let a =
+            CapabilitySet::from_capabilities(vec![cap("lint", "1.0.0"), cap("deploy", "1.0.0")]);
         let b = CapabilitySet::from_capabilities(vec![cap("lint", "1.0.0")]);
 
         let diff = a.difference(&b);
@@ -462,17 +458,16 @@ mod tests {
             cap("lint", "1.5.0"),
             cap("lint", "1.3.0"),
         ]);
-        let req = CapabilityRequirement::required("lint", VersionConstraint::parse("^1.0.0").unwrap());
+        let req =
+            CapabilityRequirement::required("lint", VersionConstraint::parse("^1.0.0").unwrap());
         let m = set.find_match(&req).unwrap();
         assert_eq!(m.version, "1.5.0".parse::<SemVer>().unwrap());
     }
 
     #[test]
     fn score_all_required_met() {
-        let caps = CapabilitySet::from_capabilities(vec![
-            cap("lint", "1.0.0"),
-            cap("test", "2.0.0"),
-        ]);
+        let caps =
+            CapabilitySet::from_capabilities(vec![cap("lint", "1.0.0"), cap("test", "2.0.0")]);
         let reqs = vec![
             CapabilityRequirement::required("lint", VersionConstraint::parse("^1.0.0").unwrap()),
             CapabilityRequirement::required("test", VersionConstraint::parse(">=1.0.0").unwrap()),
@@ -506,10 +501,7 @@ mod tests {
                 cap("test", "1.0.0"),
             ]),
             // Agent 2: lint + deploy (required) but no optional
-            CapabilitySet::from_capabilities(vec![
-                cap("lint", "1.0.0"),
-                cap("deploy", "1.0.0"),
-            ]),
+            CapabilitySet::from_capabilities(vec![cap("lint", "1.0.0"), cap("deploy", "1.0.0")]),
         ];
         let reqs = vec![
             CapabilityRequirement::required("lint", VersionConstraint::parse("^1.0.0").unwrap()),

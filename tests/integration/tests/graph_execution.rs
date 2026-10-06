@@ -4,11 +4,10 @@
 //! propagation, and mid-execution cancellation.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use daf_integration_tests::init_tracing;
@@ -29,7 +28,6 @@ impl NodeId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NodeState {
     Pending,
-    Running,
     Completed,
     Failed,
     Skipped,
@@ -158,10 +156,7 @@ impl TaskDag {
 
     /// Execute the DAG, tracking order of execution. Returns the execution
     /// log and whether the entire DAG succeeded.
-    async fn execute(
-        &mut self,
-        cancel: Arc<AtomicBool>,
-    ) -> (Vec<(NodeId, NodeState)>, bool) {
+    async fn execute(&mut self, cancel: Arc<AtomicBool>) -> (Vec<(NodeId, NodeState)>, bool) {
         let waves = self.plan_waves();
         let mut log = Vec::new();
         let mut failed_nodes: HashSet<NodeId> = HashSet::new();
@@ -267,6 +262,7 @@ async fn parallel_wave_execution() {
     //     D
     let mut dag = TaskDag::new();
     let a = dag.add(TaskNode::new("A"));
+    assert_eq!(dag.get(a).unwrap().name, "A");
     let b = dag.add(TaskNode::new("B").with_dep(a));
     let c = dag.add(TaskNode::new("C").with_dep(a));
     let d = dag.add(TaskNode::new("D").with_dep(b).with_dep(c));
@@ -325,7 +321,7 @@ async fn failure_skips_dependent_nodes() {
 // Test: Cancellation mid-execution
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn cancellation_mid_execution() {
     init_tracing();
 
@@ -335,14 +331,14 @@ async fn cancellation_mid_execution() {
     let n2 = dag.add(TaskNode::new("N2").with_dep(n1).with_duration(5));
     let n3 = dag.add(TaskNode::new("N3").with_dep(n2).with_duration(5));
     let n4 = dag.add(TaskNode::new("N4").with_dep(n3).with_duration(5));
-    let n5 = dag.add(TaskNode::new("N5").with_dep(n4).with_duration(5));
+    let _n5 = dag.add(TaskNode::new("N5").with_dep(n4).with_duration(5));
 
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_clone = cancel.clone();
 
-    // Schedule cancellation after a short delay (enough for first 2 waves).
+    // Virtual time prevents host scheduling load from racing chain completion.
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::time::sleep(Duration::from_millis(15)).await;
         cancel_clone.store(true, Ordering::Relaxed);
     });
 
@@ -360,7 +356,11 @@ async fn cancellation_mid_execution() {
 
     // Early nodes should have completed.
     let states: HashMap<NodeId, NodeState> = log.into_iter().collect();
-    assert_eq!(states[&n1], NodeState::Completed, "N1 should complete before cancel");
+    assert_eq!(
+        states[&n1],
+        NodeState::Completed,
+        "N1 should complete before cancel"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 //!
 //! The [`Registry`] is the central phone book of the DAF cluster. It stores
 //! live agent instances in a lock-free [`DashMap`], tracks their health via
-//! the [`HealthMonitor`](crate::health::HealthMonitor), and provides discovery
+//! the [`HealthMonitor`], and provides discovery
 //! APIs that match capability requirements against registered agents.
 //!
 //! All public methods are `&self` — the registry is designed for concurrent
@@ -12,14 +12,12 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use dashmap::DashMap;
 use daf_core::{AgentId, AgentKind, AgentManifest, AgentStatus, DafError, DafResult};
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use crate::capability::{
-    score_capabilities, CapabilityRequirement, CapabilitySet, MatchScore,
-};
+use crate::capability::{CapabilityRequirement, CapabilitySet, MatchScore, score_capabilities};
 use crate::health::{HealthMonitor, HealthStatus};
 use crate::version::SemVer;
 
@@ -152,35 +150,36 @@ impl Registry {
     pub fn register_agent(&self, manifest: AgentManifest) -> DafResult<()> {
         let id = manifest.id;
 
-        if self.agents.contains_key(&id) {
-            return Err(DafError::AgentError {
+        match self.agents.entry(id) {
+            dashmap::mapref::entry::Entry::Occupied(_) => Err(DafError::AgentError {
                 agent_id: Some(id.into()),
                 message: format!("agent {id} is already registered"),
-            });
+            }),
+            dashmap::mapref::entry::Entry::Vacant(slot) => {
+                let entry = RegistryEntry::new(manifest);
+                self.health_monitor.track(id);
+                slot.insert(entry);
+                Ok(())
+            }
         }
-
-        let entry = RegistryEntry::new(manifest);
-        info!(
-            agent_id = %id,
-            name = %entry.manifest.name,
-            kind = %entry.manifest.kind,
-            capabilities = entry.capabilities.len(),
-            "registering agent"
-        );
-
-        self.health_monitor.track(id);
-        self.agents.insert(id, entry);
-        Ok(())
     }
 
     /// Unregister an agent, removing it from the registry and health monitor.
     pub fn unregister_agent(&self, id: &AgentId) -> DafResult<RegistryEntry> {
-        let (_, entry) = self.agents.remove(id).ok_or_else(|| DafError::NotFound {
-            entity: "agent".into(),
-            id: id.to_string(),
-        })?;
-
-        self.health_monitor.untrack(id);
+        let entry = match self.agents.entry(*id) {
+            dashmap::mapref::entry::Entry::Occupied(slot) => {
+                // Keep the registry shard locked until health teardown finishes,
+                // so re-registration cannot have its new health record removed.
+                self.health_monitor.untrack(id);
+                slot.remove()
+            }
+            dashmap::mapref::entry::Entry::Vacant(_) => {
+                return Err(DafError::NotFound {
+                    entity: "agent".into(),
+                    id: id.to_string(),
+                });
+            }
+        };
         info!(agent_id = %id, name = %entry.manifest.name, "unregistered agent");
         Ok(entry)
     }
@@ -274,7 +273,10 @@ impl Registry {
     ///
     /// Returns entries sorted by match score (best first). Only agents that
     /// satisfy all *required* capabilities are returned.
-    pub fn discover(&self, requirements: &[CapabilityRequirement]) -> Vec<(RegistryEntry, MatchScore)> {
+    pub fn discover(
+        &self,
+        requirements: &[CapabilityRequirement],
+    ) -> Vec<(RegistryEntry, MatchScore)> {
         // Collect capability sets and entries for scoring.
         let entries: Vec<(AgentId, RegistryEntry)> = self
             .agents
@@ -304,7 +306,10 @@ impl Registry {
     }
 
     /// Find the single best agent for a set of requirements.
-    pub fn best_agent(&self, requirements: &[CapabilityRequirement]) -> Option<(RegistryEntry, MatchScore)> {
+    pub fn best_agent(
+        &self,
+        requirements: &[CapabilityRequirement],
+    ) -> Option<(RegistryEntry, MatchScore)> {
         self.discover(requirements).into_iter().next()
     }
 
@@ -364,10 +369,35 @@ mod tests {
     fn make_manifest(name: &str, kind: AgentKind, caps: Vec<(&str, &str)>) -> AgentManifest {
         let mut m = AgentManifest::new(kind, name);
         for (cap_name, ver) in caps {
-            m.capabilities
-                .push(AgentCapability::new(cap_name, ver, ""));
+            m.capabilities.push(AgentCapability::new(cap_name, ver, ""));
         }
         m
+    }
+
+    #[test]
+    fn concurrent_duplicate_registration_has_one_winner() {
+        let registry = Arc::new(Registry::with_defaults());
+        let manifest = make_manifest("same", AgentKind::Worker, vec![]);
+        let barrier = Arc::new(std::sync::Barrier::new(16));
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                let registry = registry.clone();
+                let manifest = manifest.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    registry.register_agent(manifest).is_ok()
+                })
+            })
+            .collect();
+        assert_eq!(
+            handles
+                .into_iter()
+                .map(|h| usize::from(h.join().unwrap()))
+                .sum::<usize>(),
+            1
+        );
+        assert_eq!(registry.len(), 1);
     }
 
     #[test]
@@ -438,17 +468,16 @@ mod tests {
         reg.register_agent(manifest).unwrap();
 
         reg.update_status(&id, AgentStatus::Executing).unwrap();
-        assert_eq!(
-            reg.get_agent(&id).unwrap().status,
-            AgentStatus::Executing
-        );
+        assert_eq!(reg.get_agent(&id).unwrap().status, AgentStatus::Executing);
     }
 
     #[test]
     fn list_agents_no_filter() {
         let reg = Registry::with_defaults();
-        reg.register_agent(make_manifest("w1", AgentKind::Worker, vec![])).unwrap();
-        reg.register_agent(make_manifest("s1", AgentKind::Specialist, vec![])).unwrap();
+        reg.register_agent(make_manifest("w1", AgentKind::Worker, vec![]))
+            .unwrap();
+        reg.register_agent(make_manifest("s1", AgentKind::Specialist, vec![]))
+            .unwrap();
 
         let all = reg.list_agents(None);
         assert_eq!(all.len(), 2);
@@ -457,9 +486,12 @@ mod tests {
     #[test]
     fn list_agents_filter_by_kind() {
         let reg = Registry::with_defaults();
-        reg.register_agent(make_manifest("w1", AgentKind::Worker, vec![])).unwrap();
-        reg.register_agent(make_manifest("w2", AgentKind::Worker, vec![])).unwrap();
-        reg.register_agent(make_manifest("s1", AgentKind::Specialist, vec![])).unwrap();
+        reg.register_agent(make_manifest("w1", AgentKind::Worker, vec![]))
+            .unwrap();
+        reg.register_agent(make_manifest("w2", AgentKind::Worker, vec![]))
+            .unwrap();
+        reg.register_agent(make_manifest("s1", AgentKind::Specialist, vec![]))
+            .unwrap();
 
         let filter = AgentFilter::new().with_kind(AgentKind::Worker);
         let workers = reg.list_agents(Some(&filter));
@@ -469,8 +501,18 @@ mod tests {
     #[test]
     fn list_agents_filter_by_capability() {
         let reg = Registry::with_defaults();
-        reg.register_agent(make_manifest("w1", AgentKind::Worker, vec![("lint", "1.0.0")])).unwrap();
-        reg.register_agent(make_manifest("w2", AgentKind::Worker, vec![("deploy", "1.0.0")])).unwrap();
+        reg.register_agent(make_manifest(
+            "w1",
+            AgentKind::Worker,
+            vec![("lint", "1.0.0")],
+        ))
+        .unwrap();
+        reg.register_agent(make_manifest(
+            "w2",
+            AgentKind::Worker,
+            vec![("deploy", "1.0.0")],
+        ))
+        .unwrap();
 
         let filter = AgentFilter::new().with_capability("lint");
         let result = reg.list_agents(Some(&filter));
@@ -485,12 +527,14 @@ mod tests {
             "full-stack",
             AgentKind::Specialist,
             vec![("lint", "1.0.0"), ("test", "1.0.0"), ("deploy", "2.0.0")],
-        )).unwrap();
+        ))
+        .unwrap();
         reg.register_agent(make_manifest(
             "lint-only",
             AgentKind::Worker,
             vec![("lint", "1.0.0")],
-        )).unwrap();
+        ))
+        .unwrap();
 
         let reqs = vec![
             CapabilityRequirement::required(
@@ -516,12 +560,14 @@ mod tests {
             "basic",
             AgentKind::Worker,
             vec![("lint", "1.0.0")],
-        )).unwrap();
+        ))
+        .unwrap();
         reg.register_agent(make_manifest(
             "premium",
             AgentKind::Worker,
             vec![("lint", "1.0.0"), ("format", "1.0.0")],
-        )).unwrap();
+        ))
+        .unwrap();
 
         let reqs = vec![
             CapabilityRequirement::required(
@@ -547,7 +593,8 @@ mod tests {
             "agent-a",
             AgentKind::Worker,
             vec![("lint", "1.0.0"), ("test", "1.0.0")],
-        )).unwrap();
+        ))
+        .unwrap();
 
         let reqs = vec![CapabilityRequirement::required(
             "lint",

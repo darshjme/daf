@@ -58,13 +58,13 @@ impl Condition {
     /// keys return `false` except for [`Condition::Undefined`].
     pub fn evaluate(&self, vars: &HashMap<String, Value>) -> bool {
         match self {
-            Self::Equals(key, expected) => resolve(vars, key)
-                .map(|v| v == *expected)
-                .unwrap_or(false),
+            Self::Equals(key, expected) => {
+                resolve(vars, key).map(|v| v == *expected).unwrap_or(false)
+            }
 
-            Self::NotEquals(key, expected) => resolve(vars, key)
-                .map(|v| v != *expected)
-                .unwrap_or(true),
+            Self::NotEquals(key, expected) => {
+                resolve(vars, key).map(|v| v != *expected).unwrap_or(true)
+            }
 
             Self::Contains(key, needle) => resolve(vars, key)
                 .map(|v| value_contains(&v, needle))
@@ -150,7 +150,8 @@ fn evaluate_expression(expr: &str, vars: &HashMap<String, Value>) -> bool {
     }
 
     // Binary operators
-    let ops: &[(&str, fn(&Value, &Value) -> bool)] = &[
+    type Comparison = fn(&Value, &Value) -> bool;
+    let ops: &[(&str, Comparison)] = &[
         (" == ", bin_eq),
         (" != ", bin_ne),
         (" contains ", bin_contains),
@@ -167,9 +168,7 @@ fn evaluate_expression(expr: &str, vars: &HashMap<String, Value>) -> bool {
     }
 
     // Fallback: treat the whole expression as a variable name; truthy check.
-    resolve(vars, expr)
-        .map(|v| is_truthy(&v))
-        .unwrap_or(false)
+    resolve(vars, expr).map(|v| is_truthy(&v)).unwrap_or(false)
 }
 
 fn bin_eq(a: &Value, b: &Value) -> bool {

@@ -42,8 +42,8 @@ pub const HEADER_SIZE: usize = 21;
 
 /// Maximum allowed payload size: 16 MiB.
 ///
-/// Agents exchanging payloads larger than this should use the streaming
-/// extension (chunked `Data` frames with the `MORE_FRAGMENTS` flag set).
+/// Applications exchanging larger messages must define bounded chunking and
+/// reassembly. The `MORE_FRAGMENTS` flag alone does not implement streaming.
 pub const MAX_PAYLOAD_SIZE: u32 = 16 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -120,8 +120,7 @@ pub enum FrameType {
 
 impl FrameType {
     /// Decode a raw byte into a `FrameType`, returning `None` for unknown
-    /// discriminants so that forward-compatible peers can skip frames they
-    /// don't understand rather than crashing.
+    /// discriminants. The frame decoder rejects unknown types immediately.
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
             0x01 => Some(Self::Handshake),
@@ -175,7 +174,8 @@ impl FrameFlags {
 /// The checksum covers the header bytes `[0..17]` (everything before the
 /// checksum field itself) concatenated with the payload. We use blake3 for
 /// speed and truncate to 32 bits — this is a corruption detector, not a
-/// cryptographic MAC. Authentication happens at the handshake layer.
+/// cryptographic MAC. Applications must authenticate peers separately;
+/// parsing a handshake does not validate identity or authorize a task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frame {
     /// Protocol version of the sender.
@@ -259,10 +259,13 @@ impl Frame {
 
     /// Serialize the frame into a byte buffer suitable for writing to a socket.
     ///
-    /// The caller (typically [`DdalCodec`](crate::codec::DdalCodec)) writes
-    /// the returned bytes directly to the transport.
+    /// This is a low-level serializer: it preserves the public header fields
+    /// exactly, including an invalid declared length or checksum. Use
+    /// [`DdalCodec`](crate::codec::DdalCodec) to validate outgoing frames.
     pub fn encode_to_bytes(&self) -> BytesMut {
-        let mut buf = BytesMut::with_capacity(HEADER_SIZE + self.payload_len as usize);
+        // A public, forged length must not force a multi-gigabyte allocation
+        // when the actual payload is small. The codec validates consistency.
+        let mut buf = BytesMut::with_capacity(HEADER_SIZE + self.payload.len());
 
         // Magic
         buf.put_slice(&MAGIC_BYTES);
@@ -294,30 +297,17 @@ impl Frame {
     ///
     /// # Errors
     ///
-    /// Returns `Err` if the magic bytes are wrong, the frame type is unknown,
-    /// or the payload length exceeds [`MAX_PAYLOAD_SIZE`].
+    /// Returns `Err` for invalid header fields or a checksum mismatch. Header
+    /// errors are rejected before waiting for the advertised payload and do
+    /// not consume any bytes.
     pub fn decode_from_bytes(buf: &mut BytesMut) -> Result<Option<Self>, FrameDecodeError> {
         if buf.len() < HEADER_SIZE {
             return Ok(None); // need more data
         }
 
-        // Peek at magic bytes without consuming.
-        if buf[0..4] != MAGIC_BYTES {
-            return Err(FrameDecodeError::InvalidMagic {
-                got: [buf[0], buf[1], buf[2], buf[3]],
-            });
-        }
-
+        Self::validate_header(buf)?;
         // Peek at payload_len to know total frame size.
-        let payload_len =
-            u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]);
-
-        if payload_len > MAX_PAYLOAD_SIZE {
-            return Err(FrameDecodeError::PayloadTooLarge {
-                size: payload_len,
-                max: MAX_PAYLOAD_SIZE,
-            });
-        }
+        let payload_len = u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]);
 
         let total_frame_size = HEADER_SIZE + payload_len as usize;
         if buf.len() < total_frame_size {
@@ -334,13 +324,16 @@ impl Frame {
         let major = frame_buf.get_u8();
         let minor = frame_buf.get_u8();
         let patch = frame_buf.get_u8();
-        let version = ProtocolVersion { major, minor, patch };
+        let version = ProtocolVersion {
+            major,
+            minor,
+            patch,
+        };
 
         // Frame type
         let frame_type_byte = frame_buf.get_u8();
-        let frame_type = FrameType::from_u8(frame_type_byte).ok_or(
-            FrameDecodeError::UnknownFrameType(frame_type_byte),
-        )?;
+        let frame_type = FrameType::from_u8(frame_type_byte)
+            .ok_or(FrameDecodeError::UnknownFrameType(frame_type_byte))?;
 
         // Stream ID
         let stream_id = frame_buf.get_u32();
@@ -377,6 +370,36 @@ impl Frame {
 
         Ok(Some(frame))
     }
+
+    /// Validate a complete fixed header before payload buffering or allocation.
+    /// Both decoding entry points use the same admission rules.
+    pub(crate) fn validate_header(buf: &[u8]) -> Result<(), FrameDecodeError> {
+        debug_assert!(buf.len() >= HEADER_SIZE);
+        if buf[0..4] != MAGIC_BYTES {
+            return Err(FrameDecodeError::InvalidMagic {
+                got: [buf[0], buf[1], buf[2], buf[3]],
+            });
+        }
+        let version = ProtocolVersion {
+            major: buf[4],
+            minor: buf[5],
+            patch: buf[6],
+        };
+        if !ProtocolVersion::CURRENT.is_compatible_with(&version) {
+            return Err(FrameDecodeError::UnsupportedVersion(version));
+        }
+        if FrameType::from_u8(buf[7]).is_none() {
+            return Err(FrameDecodeError::UnknownFrameType(buf[7]));
+        }
+        let payload_len = u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]);
+        if payload_len > MAX_PAYLOAD_SIZE {
+            return Err(FrameDecodeError::PayloadTooLarge {
+                size: payload_len,
+                max: MAX_PAYLOAD_SIZE,
+            });
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Display for Frame {
@@ -396,6 +419,8 @@ impl fmt::Display for Frame {
 /// Errors that can occur while decoding a frame from the wire.
 #[derive(Debug, thiserror::Error)]
 pub enum FrameDecodeError {
+    #[error("unsupported protocol version: {0}")]
+    UnsupportedVersion(ProtocolVersion),
     #[error("invalid magic bytes: expected {expected:02X?}, got {got:02X?}", expected = MAGIC_BYTES)]
     InvalidMagic { got: [u8; 4] },
 
@@ -416,6 +441,43 @@ pub enum FrameDecodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incompatible_version_is_rejected_before_payload_arrives() {
+        let mut frame = Frame::data(1, Bytes::from_static(b"payload"));
+        frame.version.major = 99;
+        frame.checksum = frame.compute_checksum();
+        let bytes = frame.encode_to_bytes();
+        let mut header = BytesMut::from(&bytes[..HEADER_SIZE]);
+        assert!(matches!(
+            Frame::decode_from_bytes(&mut header),
+            Err(FrameDecodeError::UnsupportedVersion(_))
+        ));
+    }
+
+    #[test]
+    fn unknown_frame_type_is_rejected_before_payload_arrives() {
+        let frame = Frame::data(1, Bytes::from_static(b"payload"));
+        let mut header = BytesMut::from(&frame.encode_to_bytes()[..HEADER_SIZE]);
+        header[7] = 0xff;
+        header[12..16].copy_from_slice(&MAX_PAYLOAD_SIZE.to_be_bytes());
+        let original = header.clone();
+        assert!(matches!(
+            Frame::decode_from_bytes(&mut header),
+            Err(FrameDecodeError::UnknownFrameType(0xff))
+        ));
+        assert_eq!(header, original, "invalid header must not consume input");
+    }
+
+    #[test]
+    fn forged_declared_length_does_not_control_raw_serializer_allocation() {
+        let mut frame = Frame::data(1, Bytes::from_static(b"small"));
+        frame.payload_len = u32::MAX;
+        let encoded = frame.encode_to_bytes();
+        assert_eq!(encoded.len(), HEADER_SIZE + frame.payload.len());
+        assert!(encoded.capacity() <= HEADER_SIZE + frame.payload.len());
+        assert_eq!(&encoded[12..16], &u32::MAX.to_be_bytes());
+    }
 
     #[test]
     fn protocol_version_display() {

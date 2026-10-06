@@ -154,8 +154,15 @@ impl AgentLoad {
     }
 
     fn complete(&self) {
-        self.active_tasks.fetch_sub(1, Ordering::Relaxed);
-        self.total_completed.fetch_add(1, Ordering::Relaxed);
+        if self
+            .active_tasks
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
+                active.checked_sub(1)
+            })
+            .is_ok()
+        {
+            self.total_completed.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -229,7 +236,7 @@ pub struct SpecialistRouter {
     load: DashMap<AgentId, AgentLoad>,
     /// Agent status tracking.
     status: DashMap<AgentId, AgentStatus>,
-    /// Context affinity table: context_key -> Vec<AffinityEntry>.
+    /// Context affinity table: context_key -> `Vec<AffinityEntry>`.
     affinities: DashMap<String, Vec<AffinityEntry>>,
     /// Role-to-agent index for fast lookups.
     role_index: DashMap<SpecialistRole, Vec<AgentId>>,
@@ -286,10 +293,7 @@ impl SpecialistRouter {
             "registering agent with specialist router"
         );
 
-        self.role_index
-            .entry(role)
-            .or_default()
-            .push(agent_id);
+        self.role_index.entry(role).or_default().push(agent_id);
 
         self.load.insert(agent_id, AgentLoad::new());
         self.status.insert(agent_id, AgentStatus::Idle);
@@ -330,10 +334,7 @@ impl SpecialistRouter {
             strength: 1.0,
         };
 
-        self.affinities
-            .entry(context_key)
-            .or_default()
-            .push(entry);
+        self.affinities.entry(context_key).or_default().push(entry);
     }
 
     /// Route a task to the best available specialist.
@@ -347,11 +348,34 @@ impl SpecialistRouter {
         required_capabilities: &[String],
         context_key: Option<&str>,
     ) -> DafResult<RoutingDecision> {
+        self.route_task_filtered(task, required_capabilities, context_key, None)
+    }
+
+    /// Route only to a caller-provided set of executable agent IDs.
+    pub fn route_task_for_agents(
+        &self,
+        task: &TaskSpec,
+        required_capabilities: &[String],
+        allowed: &std::collections::HashSet<AgentId>,
+    ) -> DafResult<RoutingDecision> {
+        self.route_task_filtered(task, required_capabilities, None, Some(allowed))
+    }
+
+    fn route_task_filtered(
+        &self,
+        task: &TaskSpec,
+        required_capabilities: &[String],
+        context_key: Option<&str>,
+        allowed: Option<&std::collections::HashSet<AgentId>>,
+    ) -> DafResult<RoutingDecision> {
         let mut candidates: Vec<RoutingDecision> = Vec::new();
 
         for entry in self.agents.iter() {
             let agent_id = *entry.key();
             let manifest = entry.value();
+            if allowed.is_some_and(|ids| !ids.contains(&agent_id)) {
+                continue;
+            }
 
             // Skip agents that aren't idle or executing (can take more work).
             if let Some(status) = self.status.get(&agent_id) {
@@ -372,8 +396,8 @@ impl SpecialistRouter {
                 matched as f64 / required_capabilities.len() as f64
             };
 
-            // Skip agents that don't match any required capability.
-            if !required_capabilities.is_empty() && cap_score == 0.0 {
+            // Required capabilities are constraints, not optional score hints.
+            if !required_capabilities.is_empty() && cap_score < 1.0 {
                 continue;
             }
 
@@ -393,10 +417,8 @@ impl SpecialistRouter {
                         .filter(|e| e.agent_id == agent_id)
                         .map(|e| {
                             // Decay affinity over time (half-life: 1 hour).
-                            let age_hours = (Utc::now() - e.last_used)
-                                .num_seconds()
-                                .max(0) as f64
-                                / 3600.0;
+                            let age_hours =
+                                (Utc::now() - e.last_used).num_seconds().max(0) as f64 / 3600.0;
                             e.strength * (-age_hours / 1.0).exp()
                         })
                         .sum::<f64>()
@@ -437,7 +459,11 @@ impl SpecialistRouter {
         }
 
         // Sort by score descending, pick the best.
-        candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let winner = candidates.into_iter().next().unwrap();
 
@@ -461,10 +487,7 @@ impl SpecialistRouter {
 
     /// Get the number of active tasks for an agent.
     pub fn active_tasks(&self, agent_id: &AgentId) -> u64 {
-        self.load
-            .get(agent_id)
-            .map(|l| l.active())
-            .unwrap_or(0)
+        self.load.get(agent_id).map(|l| l.active()).unwrap_or(0)
     }
 
     /// Get the total number of registered agents.
@@ -508,8 +531,11 @@ mod tests {
     fn make_agent(name: &str, capabilities: &[&str]) -> AgentManifest {
         let mut m = AgentManifest::new(AgentKind::Specialist, name);
         for cap in capabilities {
-            m.capabilities
-                .push(AgentCapability::new(*cap, "1.0.0", format!("{cap} capability")));
+            m.capabilities.push(AgentCapability::new(
+                *cap,
+                "1.0.0",
+                format!("{cap} capability"),
+            ));
         }
         m
     }
@@ -521,6 +547,37 @@ mod tests {
             timeout: None,
             max_retries: 0,
         }
+    }
+
+    #[test]
+    fn partial_capability_match_is_not_eligible() {
+        let router = SpecialistRouter::new();
+        router.register_agent(make_agent("partial", &["build"]));
+        assert!(
+            router
+                .route_task(
+                    &TaskSpec {
+                        task_type: "build-and-test".into(),
+                        params: serde_json::Value::Null,
+                        timeout: None,
+                        max_retries: 0,
+                    },
+                    &["build".into(), "test".into()],
+                    None
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn duplicate_completion_cannot_underflow_agent_load() {
+        let router = SpecialistRouter::new();
+        let manifest = make_agent("worker", &["build"]);
+        let id = manifest.id;
+        router.register_agent(manifest);
+        router.record_task_completion(&id);
+        router.record_task_completion(&id);
+        assert_eq!(router.active_tasks(&id), 0);
     }
 
     #[test]
@@ -643,11 +700,7 @@ mod tests {
         // Mark agent as failed.
         router.update_status(&agent_id, AgentStatus::Failed);
 
-        let result = router.route_task(
-            &sample_task("build"),
-            &["code_generation".into()],
-            None,
-        );
+        let result = router.route_task(&sample_task("build"), &["code_generation".into()], None);
         assert!(result.is_err());
     }
 

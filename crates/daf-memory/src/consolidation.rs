@@ -116,7 +116,7 @@ impl Consolidator {
             .into_iter()
             .filter(|m| {
                 let age_hours = (now - m.created_at).num_seconds().max(0) as f64 / 3600.0;
-                age_hours <= self.config.lookback_hours
+                !m.is_expired() && age_hours <= self.config.lookback_hours
             })
             .collect();
 
@@ -128,11 +128,18 @@ impl Consolidator {
 
         // Phase 2: Merge similar memories.
         let merged = self.merge_similar_batch(&recent).await?;
-        report.merged = merged as u64;
+        report.merged = merged;
 
-        // Phase 3: Reinforce frequently accessed memories.
-        let reinforced = self.reinforce_batch(&recent).await?;
-        report.reinforced = reinforced as u64;
+        // Merge changes counts/tags and removes records. Reload the survivors
+        // so reinforcement cannot overwrite merged data with stale snapshots.
+        let mut survivors = Vec::new();
+        for memory in &recent {
+            if let Some(current) = self.store.retrieve(&memory.id).await? {
+                survivors.push(current);
+            }
+        }
+        let reinforced = self.reinforce_batch(&survivors).await?;
+        report.reinforced = reinforced;
 
         info!(
             reviewed = report.reviewed,
@@ -162,13 +169,22 @@ impl Consolidator {
                 continue; // Not important enough to distill.
             }
 
+            let provenance = format!("distilled_from:{}", memory.id);
+            if !self.store.list_by_tag(&provenance, 1).await?.is_empty() {
+                continue;
+            }
             // Extract the core content for the semantic memory.
             let distilled_content = self.distill_content(&memory.content);
 
-            let semantic = Memory::new(MemoryKind::Semantic, distilled_content)
+            let mut semantic = Memory::new(MemoryKind::Semantic, distilled_content)
                 .with_importance((memory.importance * 0.9).clamp(0.0, 1.0))
                 .with_tier(MemoryTier::Warm)
                 .with_tags(memory.tags.clone());
+            semantic.tags.push(provenance);
+            semantic.source_agent = memory.source_agent;
+            semantic.source_conversation = memory.source_conversation;
+            semantic.ttl = memory.ttl;
+            semantic.created_at = memory.created_at;
 
             let id = semantic.id;
             self.store.store(&semantic).await?;
@@ -196,13 +212,11 @@ impl Consolidator {
         // Group by kind for comparison.
         let mut by_kind: HashMap<String, Vec<&Memory>> = HashMap::new();
         for m in memories {
-            by_kind
-                .entry(m.kind.to_string())
-                .or_default()
-                .push(m);
+            by_kind.entry(m.kind.to_string()).or_default().push(m);
         }
 
-        for (_kind, group) in &by_kind {
+        for group in by_kind.values_mut() {
+            group.sort_by_key(|memory| (memory.created_at, memory.id));
             if group.len() < 2 {
                 continue;
             }
@@ -216,6 +230,23 @@ impl Consolidator {
                         continue;
                     }
 
+                    // Distinct agents/conversations and distilled provenance
+                    // must not be collapsed across ownership boundaries.
+                    if group[i].source_agent != group[j].source_agent
+                        || group[i].source_conversation != group[j].source_conversation
+                        || group[i]
+                            .tags
+                            .iter()
+                            .filter(|t| t.starts_with("distilled_from:"))
+                            .collect::<Vec<_>>()
+                            != group[j]
+                                .tags
+                                .iter()
+                                .filter(|t| t.starts_with("distilled_from:"))
+                                .collect::<Vec<_>>()
+                    {
+                        continue;
+                    }
                     let similarity = content_similarity(
                         &group[i].content.to_string(),
                         &group[j].content.to_string(),
@@ -223,10 +254,12 @@ impl Consolidator {
 
                     if similarity >= self.config.similarity_threshold {
                         // Merge j into i: keep i, delete j.
-                        let mut keeper = group[i].clone();
-                        keeper.access_count += group[j].access_count;
-                        keeper.importance =
-                            keeper.importance.max(group[j].importance);
+                        let Some(mut keeper) = self.store.retrieve(&group[i].id).await? else {
+                            continue;
+                        };
+                        keeper.access_count =
+                            keeper.access_count.saturating_add(group[j].access_count);
+                        keeper.importance = keeper.importance.max(group[j].importance);
                         // Merge tags.
                         for tag in &group[j].tags {
                             if !keeper.tags.contains(tag) {
@@ -234,12 +267,10 @@ impl Consolidator {
                             }
                         }
 
-                        if let Err(e) = self.store.update(&keeper).await {
-                            warn!(id = %keeper.id, error = %e, "failed to update merged memory");
-                        }
-                        if let Err(e) = self.store.delete(&group[j].id).await {
-                            warn!(id = %group[j].id, error = %e, "failed to delete merged duplicate");
-                        }
+                        // Never delete evidence when persisting its merged
+                        // replacement failed. Propagate failure to the caller.
+                        self.store.update(&keeper).await?;
+                        self.store.delete(&group[j].id).await?;
 
                         merged_ids.push(group[j].id);
                         merged_count += 1;
@@ -276,8 +307,7 @@ impl Consolidator {
             if memory.access_count as f64 > avg_access && memory.access_count > 1 {
                 let mut boosted = memory.clone();
                 let boost = self.config.reinforce_boost;
-                boosted.importance =
-                    (boosted.importance + boost).min(self.config.reinforce_max);
+                boosted.importance = (boosted.importance + boost).min(self.config.reinforce_max);
 
                 if let Err(e) = self.store.update(&boosted).await {
                     warn!(id = %boosted.id, error = %e, "failed to reinforce memory");
@@ -357,10 +387,8 @@ impl Consolidator {
 fn content_similarity(a: &str, b: &str) -> f64 {
     let a_lower = a.to_lowercase();
     let b_lower = b.to_lowercase();
-    let words_a: std::collections::HashSet<&str> =
-        a_lower.split_whitespace().collect();
-    let words_b: std::collections::HashSet<&str> =
-        b_lower.split_whitespace().collect();
+    let words_a: std::collections::HashSet<&str> = a_lower.split_whitespace().collect();
+    let words_b: std::collections::HashSet<&str> = b_lower.split_whitespace().collect();
 
     if words_a.is_empty() && words_b.is_empty() {
         return 1.0;
@@ -442,10 +470,16 @@ mod tests {
         let store = Arc::new(InMemoryStore::new());
         let c = Consolidator::with_config(store.clone(), config);
 
-        let m1 = Memory::new(MemoryKind::Semantic, json!("rust is a fast systems language"))
-            .with_importance(0.5);
-        let m2 = Memory::new(MemoryKind::Semantic, json!("rust is a fast safe systems language"))
-            .with_importance(0.7);
+        let m1 = Memory::new(
+            MemoryKind::Semantic,
+            json!("rust is a fast systems language"),
+        )
+        .with_importance(0.5);
+        let m2 = Memory::new(
+            MemoryKind::Semantic,
+            json!("rust is a fast safe systems language"),
+        )
+        .with_importance(0.7);
 
         c.store.store(&m1).await.unwrap();
         c.store.store(&m2).await.unwrap();
@@ -465,11 +499,9 @@ mod tests {
     async fn reinforce_boosts_frequent() {
         let c = make_consolidator();
 
-        let mut m1 = Memory::new(MemoryKind::Semantic, json!("used often"))
-            .with_importance(0.5);
+        let mut m1 = Memory::new(MemoryKind::Semantic, json!("used often")).with_importance(0.5);
         m1.access_count = 10;
-        let mut m2 = Memory::new(MemoryKind::Semantic, json!("rarely used"))
-            .with_importance(0.5);
+        let mut m2 = Memory::new(MemoryKind::Semantic, json!("rarely used")).with_importance(0.5);
         m2.access_count = 0;
 
         c.store.store(&m1).await.unwrap();
@@ -481,6 +513,46 @@ mod tests {
 
         let boosted = c.store.retrieve(&m1.id).await.unwrap().unwrap();
         assert!(boosted.importance > 0.5);
+    }
+
+    #[tokio::test]
+    async fn distillation_is_idempotent_and_preserves_provenance() {
+        let c = make_consolidator();
+        let mut episode = Memory::new(MemoryKind::Episodic, json!({"summary": "fact"}));
+        episode.source_agent = Some(daf_core::AgentId::new());
+        c.store.store(&episode).await.unwrap();
+        let first = c.distill_batch(&[episode.clone()]).await.unwrap();
+        assert_eq!(first.len(), 1);
+        assert!(
+            c.distill_batch(&[episode.clone()])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let semantic = c.store.retrieve(&first[0]).await.unwrap().unwrap();
+        assert_eq!(semantic.source_agent, episode.source_agent);
+        assert_eq!(semantic.created_at, episode.created_at);
+    }
+
+    #[tokio::test]
+    async fn merging_three_duplicates_accumulates_all_metadata() {
+        let c = make_consolidator();
+        let mut memories = Vec::new();
+        for count in 1..=3 {
+            let mut memory = Memory::new(MemoryKind::Semantic, json!("same fact"))
+                .with_tags(vec![format!("tag{count}")]);
+            memory.access_count = count;
+            c.store.store(&memory).await.unwrap();
+            memories.push(memory);
+        }
+        // Store iteration order must not decide which record survives.
+        memories.reverse();
+        assert_eq!(c.merge_similar_batch(&memories).await.unwrap(), 2);
+        let kept = c.store.list_all(10).await.unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].access_count, 6);
+        assert_eq!(kept[0].tags.len(), 3);
+        assert_eq!(kept[0].id, memories[2].id);
     }
 
     #[tokio::test]
@@ -503,8 +575,7 @@ mod tests {
     #[tokio::test]
     async fn reinforce_single() {
         let c = make_consolidator();
-        let m = Memory::new(MemoryKind::Semantic, json!("test"))
-            .with_importance(0.5);
+        let m = Memory::new(MemoryKind::Semantic, json!("test")).with_importance(0.5);
         c.store.store(&m).await.unwrap();
 
         c.reinforce(&m.id, 0.2).await.unwrap();

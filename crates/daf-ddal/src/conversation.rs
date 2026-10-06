@@ -246,11 +246,7 @@ impl Conversation {
     ///
     /// Returns `Err` if the conversation is not in the [`Active`](ConversationState::Active)
     /// state.
-    pub fn add_turn(
-        &mut self,
-        speaker: AgentId,
-        content: Bytes,
-    ) -> Result<u64, ConversationError> {
+    pub fn add_turn(&mut self, speaker: AgentId, content: Bytes) -> Result<u64, ConversationError> {
         if !self.state.accepts_turns() {
             return Err(ConversationError::NotActive {
                 conversation_id: self.id,
@@ -415,7 +411,10 @@ impl Conversation {
 
     /// Get all turns from a specific speaker.
     pub fn turns_by_speaker(&self, speaker: &AgentId) -> Vec<&Turn> {
-        self.turns.iter().filter(|t| &t.speaker == speaker).collect()
+        self.turns
+            .iter()
+            .filter(|t| &t.speaker == speaker)
+            .collect()
     }
 
     /// Get a specific turn by number.

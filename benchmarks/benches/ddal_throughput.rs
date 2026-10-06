@@ -3,11 +3,11 @@
 //! Measures serialization, codec, routing, and multiplexing performance
 //! across a range of payload sizes.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use bytes::Bytes;
 use daf_core::message::{Envelope, Message, MessageKind, Priority};
-use daf_core::{AgentId, AgentManifest, AgentKind};
+use daf_core::{AgentId, AgentKind, AgentManifest};
 
 // ---------------------------------------------------------------------------
 // Payload sizes under test
@@ -89,17 +89,13 @@ fn bench_codec_roundtrip(c: &mut Criterion) {
         let msg = make_message(payload);
 
         group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(
-            BenchmarkId::new("json_roundtrip", label),
-            &msg,
-            |b, msg| {
-                b.iter(|| {
-                    let encoded = serde_json::to_vec(msg).expect("encode");
-                    let decoded: Message = serde_json::from_slice(&encoded).expect("decode");
-                    criterion::black_box(decoded);
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("json_roundtrip", label), &msg, |b, msg| {
+            b.iter(|| {
+                let encoded = serde_json::to_vec(msg).expect("encode");
+                let decoded: Message = serde_json::from_slice(&encoded).expect("decode");
+                criterion::black_box(decoded);
+            });
+        });
 
         // bincode round-trip (binary codec)
         group.bench_with_input(
@@ -258,9 +254,11 @@ fn bench_message_construction(c: &mut Criterion) {
     group.bench_function("manifest_creation", |b| {
         b.iter(|| {
             let m = AgentManifest::new(AgentKind::Worker, "bench-worker")
-                .with_capability(
-                    daf_core::AgentCapability::new("compute", "1.0.0", "Computation"),
-                )
+                .with_capability(daf_core::AgentCapability::new(
+                    "compute",
+                    "1.0.0",
+                    "Computation",
+                ))
                 .with_metadata("team", "platform")
                 .with_metadata("region", "us-east-1");
             criterion::black_box(m);

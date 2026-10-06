@@ -177,11 +177,7 @@ impl AuditLog {
     }
 
     /// Query entries by time range (inclusive on both ends).
-    pub fn query_by_time(
-        &self,
-        from: DateTime<Utc>,
-        to: DateTime<Utc>,
-    ) -> Vec<AuditEntry> {
+    pub fn query_by_time(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> Vec<AuditEntry> {
         self.entries
             .read()
             .iter()

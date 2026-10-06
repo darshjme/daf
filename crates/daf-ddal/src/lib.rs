@@ -30,13 +30,9 @@ pub use channel::{Channel, ChannelError, ChannelInboundWriter, ChannelPool, Chan
 pub use codec::{DdalCodec, DdalCodecError};
 pub use conversation::{Conversation, ConversationError, ConversationId, ConversationState, Turn};
 pub use handshake::{
-    complete_handshake_server, perform_handshake_client, perform_handshake_server,
-    HandshakeRequest, HandshakeResponse,
+    HandshakeRequest, HandshakeResponse, complete_handshake_server, perform_handshake_client,
+    perform_handshake_server,
 };
 pub use protocol::{Frame, FrameDecodeError, FrameFlags, FrameType, ProtocolVersion};
-pub use router::{
-    BalancingStrategy, RouteEntry, Router, RoutingTable, TopicRegistry,
-};
-pub use serialization::{
-    deserialize_payload, detect_format, serialize_payload, PayloadFormat,
-};
+pub use router::{BalancingStrategy, RouteEntry, Router, RoutingTable, TopicRegistry};
+pub use serialization::{PayloadFormat, deserialize_payload, detect_format, serialize_payload};

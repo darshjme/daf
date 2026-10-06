@@ -15,7 +15,7 @@ daf-registry = { path = "../../crates/daf-registry" }
 daf-orchestrator = { path = "../../crates/daf-orchestrator" }
 daf-sdk = { path = "../../crates/daf-sdk" }
 daf-runtime = { path = "../../crates/daf-runtime" }
-tokio = { version = "1.44", features = ["full"] }
+tokio = { version = "1.44", features = ["full", "test-util"] }
 serde_json = "1.0"
 tempfile = "3.15"
 tracing = "0.1"
@@ -24,3 +24,5 @@ uuid = { version = "1.16", features = ["v4", "v7"] }
 bytes = "1.10"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures-util = { version = "0.3", features = ["sink"] }

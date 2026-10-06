@@ -9,10 +9,10 @@ use crate::edge::{Edge, EdgeCondition};
 use crate::error::GraphError;
 use crate::node::{Node, NodeId, NodeState};
 
+use petgraph::Direction;
 use petgraph::algo::{is_cyclic_directed, toposort};
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
-use petgraph::Direction;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
@@ -61,6 +61,9 @@ impl<'de> Deserialize<'de> for ExecutionGraph {
         let wire = GraphWire::deserialize(deserializer)?;
         let mut g = ExecutionGraph::new(wire.name);
         for node in wire.nodes {
+            if g.index_map.contains_key(&node.id) {
+                return Err(serde::de::Error::custom("duplicate node ID"));
+            }
             g.add_node(node);
         }
         for edge in wire.edges {
@@ -94,6 +97,10 @@ impl ExecutionGraph {
     #[instrument(skip(self, node), fields(node_name = %node.name, node_kind = %node.kind))]
     pub fn add_node(&mut self, node: Node) -> NodeId {
         let id = node.id;
+        // Repeated registration must not create an unreachable duplicate.
+        if self.index_map.contains_key(&id) {
+            return id;
+        }
         let idx = self.graph.add_node(node);
         self.index_map.insert(id, idx);
         debug!("added node {id}");
@@ -151,7 +158,10 @@ impl ExecutionGraph {
         }
 
         // petgraph swaps the last node into the removed slot — fix up index_map.
-        let removed = self.graph.remove_node(idx).ok_or(GraphError::NodeNotFound(id))?;
+        let removed = self
+            .graph
+            .remove_node(idx)
+            .ok_or(GraphError::NodeNotFound(id))?;
 
         // Rebuild index_map for any node that may have been swapped.
         // After remove_node, the node that was at the last index is now at `idx`.
@@ -203,21 +213,9 @@ impl ExecutionGraph {
                 if node.state != NodeState::Pending {
                     return false;
                 }
-                // Check all incoming edges (predecessors).
                 self.graph
-                    .neighbors_directed(idx, Direction::Incoming)
-                    .all(|pred_idx| {
-                        let pred = &self.graph[pred_idx];
-                        // Find the edge from pred to this node to check conditions.
-                        let edge = self
-                            .graph
-                            .edges_connecting(pred_idx, idx)
-                            .next();
-                        match edge {
-                            Some(e) => Self::edge_satisfied(pred, e.weight()),
-                            None => pred.state.is_success(),
-                        }
-                    })
+                    .edges_directed(idx, Direction::Incoming)
+                    .all(|edge| Self::edge_satisfied(&self.graph[edge.source()], edge.weight()))
             })
             .map(|idx| self.graph[idx].id)
             .collect()
@@ -229,11 +227,9 @@ impl ExecutionGraph {
             EdgeCondition::Always => pred.state.is_terminal(),
             EdgeCondition::OnSuccess => pred.state.is_success(),
             EdgeCondition::OnFailure => pred.state == NodeState::Failed,
-            EdgeCondition::OnOutput(_) => {
-                // Output-based conditions are considered satisfied on success
-                // (the executor checks the actual output content).
-                pred.state.is_success()
-            }
+            // The current handler API has no output channel; never pretend
+            // an output predicate was evaluated.
+            EdgeCondition::OnOutput(_) => false,
         }
     }
 
@@ -258,52 +254,38 @@ impl ExecutionGraph {
 
         debug!("node {id} marked as {new_state}");
 
-        // If the node failed, cascade skips to dependents (unless edge says OnFailure).
-        if new_state == NodeState::Failed {
-            self.cascade_skip(idx);
-        }
-
+        self.skip_impossible_nodes();
         Ok(self.ready_nodes())
     }
 
-    /// Recursively skip all downstream nodes that can no longer execute
-    /// because a predecessor failed and the edge requires success.
-    fn cascade_skip(&mut self, failed_idx: NodeIndex) {
-        let mut queue: VecDeque<NodeIndex> = VecDeque::new();
-        // Collect direct dependents.
-        for succ_idx in self
-            .graph
-            .neighbors_directed(failed_idx, Direction::Outgoing)
-            .collect::<Vec<_>>()
-        {
-            // Check if the edge to this successor requires success.
-            let should_skip = self
+    /// Skip pending nodes when a terminal predecessor cannot satisfy an edge.
+    /// Repeats to propagate skips, while preserving explicit Always cleanup edges.
+    pub(crate) fn skip_impossible_nodes(&mut self) {
+        loop {
+            let impossible: Vec<_> = self
                 .graph
-                .edges_connecting(failed_idx, succ_idx)
-                .any(|e| {
-                    matches!(
-                        e.weight().effective_condition(),
-                        EdgeCondition::Always | EdgeCondition::OnSuccess
-                    )
-                });
-            if should_skip && self.graph[succ_idx].state == NodeState::Pending {
-                self.graph[succ_idx].state = NodeState::Skipped;
-                warn!("skipping node {} due to upstream failure", self.graph[succ_idx].id);
-                queue.push_back(succ_idx);
+                .node_indices()
+                .filter(|&idx| {
+                    self.graph[idx].state == NodeState::Pending
+                        && self
+                            .graph
+                            .edges_directed(idx, Direction::Incoming)
+                            .any(|edge| {
+                                let pred = &self.graph[edge.source()];
+                                pred.state.is_terminal()
+                                    && !Self::edge_satisfied(pred, edge.weight())
+                            })
+                })
+                .collect();
+            if impossible.is_empty() {
+                break;
             }
-        }
-        // BFS cascade.
-        while let Some(skipped_idx) = queue.pop_front() {
-            for succ_idx in self
-                .graph
-                .neighbors_directed(skipped_idx, Direction::Outgoing)
-                .collect::<Vec<_>>()
-            {
-                if self.graph[succ_idx].state == NodeState::Pending {
-                    self.graph[succ_idx].state = NodeState::Skipped;
-                    warn!("cascade skip: node {}", self.graph[succ_idx].id);
-                    queue.push_back(succ_idx);
-                }
+            for idx in impossible {
+                self.graph[idx].state = NodeState::Skipped;
+                warn!(
+                    "skipping node {} due to unsatisfied condition",
+                    self.graph[idx].id
+                );
             }
         }
     }
@@ -529,6 +511,36 @@ mod tests {
     }
 
     #[test]
+    fn all_parallel_edge_conditions_must_be_satisfied() {
+        let mut graph = ExecutionGraph::new("parallel-conditions");
+        let a = graph.add_node(make_task("a"));
+        let b = graph.add_node(make_task("b"));
+        graph
+            .add_edge(
+                Edge::new(a, b, EdgeKind::Conditional).with_condition(EdgeCondition::OnSuccess),
+            )
+            .unwrap();
+        graph
+            .add_edge(Edge::new(a, b, EdgeKind::Conditional).with_condition(EdgeCondition::Always))
+            .unwrap();
+        graph.mark_complete(a, NodeState::Failed, None).unwrap();
+        assert!(!graph.ready_nodes().contains(&b));
+        assert_eq!(graph.get_node(b).unwrap().state, NodeState::Skipped);
+    }
+
+    #[test]
+    fn duplicate_node_registration_preserves_lookup_and_deserialization_rejects_it() {
+        let mut graph = ExecutionGraph::new("duplicates");
+        let node = make_task("a");
+        graph.add_node(node.clone());
+        graph.add_node(node.clone());
+        assert_eq!(graph.node_count(), 1);
+        let wire =
+            serde_json::json!({"name":"duplicates", "nodes":[node.clone(),node], "edges":[]});
+        assert!(ExecutionGraph::from_json(&wire.to_string()).is_err());
+    }
+
+    #[test]
     fn add_nodes_and_edges() {
         let mut g = ExecutionGraph::new("test");
         let a = g.add_node(make_task("a"));
@@ -620,8 +632,10 @@ mod tests {
         let a_id = g.add_node(a);
         let b_id = g.add_node(b);
         let c_id = g.add_node(c);
-        g.add_edge(Edge::new(a_id, b_id, EdgeKind::DependsOn)).unwrap();
-        g.add_edge(Edge::new(b_id, c_id, EdgeKind::DependsOn)).unwrap();
+        g.add_edge(Edge::new(a_id, b_id, EdgeKind::DependsOn))
+            .unwrap();
+        g.add_edge(Edge::new(b_id, c_id, EdgeKind::DependsOn))
+            .unwrap();
 
         let (path, total) = g.critical_path().unwrap();
         assert_eq!(path, vec![a_id, b_id, c_id]);
@@ -694,11 +708,8 @@ mod tests {
         let mut g = ExecutionGraph::new("conditional");
         let a = g.add_node(make_task("main-task"));
         let b = g.add_node(make_task("fallback"));
-        g.add_edge(
-            Edge::new(a, b, EdgeKind::Conditional)
-                .with_condition(EdgeCondition::OnFailure),
-        )
-        .unwrap();
+        g.add_edge(Edge::new(a, b, EdgeKind::Conditional).with_condition(EdgeCondition::OnFailure))
+            .unwrap();
 
         // When a succeeds, b should NOT become ready (edge requires failure).
         g.mark_complete(a, NodeState::Succeeded, None).unwrap();
@@ -711,11 +722,8 @@ mod tests {
         let mut g = ExecutionGraph::new("conditional-fire");
         let a = g.add_node(make_task("main-task"));
         let b = g.add_node(make_task("fallback"));
-        g.add_edge(
-            Edge::new(a, b, EdgeKind::Conditional)
-                .with_condition(EdgeCondition::OnFailure),
-        )
-        .unwrap();
+        g.add_edge(Edge::new(a, b, EdgeKind::Conditional).with_condition(EdgeCondition::OnFailure))
+            .unwrap();
 
         // When a fails, b SHOULD become ready.
         // But we also need to prevent cascade skip for OnFailure edges.

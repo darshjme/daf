@@ -17,7 +17,7 @@ use crate::types::{Memory, MemoryKind, MemoryTier};
 // ---------------------------------------------------------------------------
 
 /// How to rank memories in recall results.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecallStrategy {
     /// Sort by `last_accessed` descending — what was touched most recently.
     MostRecent,
@@ -27,13 +27,8 @@ pub enum RecallStrategy {
     MostImportant,
     /// Composite ranking combining recency, frequency, and importance using
     /// the relevance score function on [`Memory`].
+    #[default]
     MostRelevant,
-}
-
-impl Default for RecallStrategy {
-    fn default() -> Self {
-        Self::MostRelevant
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -222,6 +217,9 @@ pub async fn execute_recall(
     let mut filtered: Vec<Memory> = candidates
         .into_iter()
         .filter(|m| {
+            if m.is_expired() {
+                return false;
+            }
             // Agent filter.
             if let Some(ref agent) = query.agent_filter {
                 if m.source_agent.as_ref() != Some(agent) {
@@ -242,10 +240,7 @@ pub async fn execute_recall(
             }
             // Tag filter (all must match).
             if !query.tag_filters.is_empty()
-                && !query
-                    .tag_filters
-                    .iter()
-                    .all(|tag| m.tags.contains(tag))
+                && !query.tag_filters.iter().all(|tag| m.tags.contains(tag))
             {
                 return false;
             }
@@ -319,11 +314,7 @@ pub async fn execute_recall(
 ///
 /// Returns the new importance value (does not mutate the memory).
 pub fn compute_decay(memory: &Memory, half_life_hours: f64) -> f64 {
-    let hours_since_access = memory
-        .time_since_access()
-        .num_seconds()
-        .max(0) as f64
-        / 3600.0;
+    let hours_since_access = memory.time_since_access().num_seconds().max(0) as f64 / 3600.0;
 
     // Exponential decay: importance * 2^(-t/half_life)
     let decay_factor = (-hours_since_access * (2.0_f64.ln()) / half_life_hours).exp();
@@ -423,10 +414,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .store(
-                &Memory::new(MemoryKind::Semantic, json!("b"))
-                    .with_tags(vec!["x".into()]),
-            )
+            .store(&Memory::new(MemoryKind::Semantic, json!("b")).with_tags(vec!["x".into()]))
             .await
             .unwrap();
 
@@ -473,8 +461,7 @@ mod tests {
 
     #[test]
     fn decay_reduces_importance() {
-        let mut m = Memory::new(MemoryKind::Semantic, json!("old fact"))
-            .with_importance(1.0);
+        let mut m = Memory::new(MemoryKind::Semantic, json!("old fact")).with_importance(1.0);
         // Simulate being accessed a long time ago.
         m.last_accessed = Utc::now() - chrono::Duration::hours(168);
 
@@ -485,8 +472,7 @@ mod tests {
 
     #[test]
     fn decay_is_zero_for_fresh_memory() {
-        let m = Memory::new(MemoryKind::Semantic, json!("fresh"))
-            .with_importance(0.8);
+        let m = Memory::new(MemoryKind::Semantic, json!("fresh")).with_importance(0.8);
         let decayed = compute_decay(&m, 168.0);
         // Freshly accessed memory should retain nearly full importance.
         assert!((decayed - 0.8).abs() < 0.01);
@@ -494,8 +480,7 @@ mod tests {
 
     #[test]
     fn apply_decay_mutates() {
-        let mut m = Memory::new(MemoryKind::Semantic, json!("test"))
-            .with_importance(0.9);
+        let mut m = Memory::new(MemoryKind::Semantic, json!("test")).with_importance(0.9);
         m.last_accessed = Utc::now() - chrono::Duration::hours(336); // 2 half-lives
         let old = apply_decay(&mut m, 168.0);
         assert!((old - 0.9).abs() < f64::EPSILON);

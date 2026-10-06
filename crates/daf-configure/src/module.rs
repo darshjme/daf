@@ -132,7 +132,11 @@ pub trait Module: Send + Sync + 'static {
     /// Implementations MUST be idempotent: running twice with the same
     /// `args` and `context` should produce `changed: false` on the
     /// second invocation.
-    async fn execute(&self, args: Value, context: &ModuleContext) -> Result<ModuleResult, ModuleError>;
+    async fn execute(
+        &self,
+        args: Value,
+        context: &ModuleContext,
+    ) -> Result<ModuleResult, ModuleError>;
 }
 
 /// Module-level errors.
@@ -260,7 +264,11 @@ impl Module for ConfigModule {
         })
     }
 
-    async fn execute(&self, args: Value, context: &ModuleContext) -> Result<ModuleResult, ModuleError> {
+    async fn execute(
+        &self,
+        args: Value,
+        context: &ModuleContext,
+    ) -> Result<ModuleResult, ModuleError> {
         let mut changes = Vec::new();
 
         // Process "set" operations.
@@ -285,7 +293,9 @@ impl Module for ConfigModule {
         }
 
         if changes.is_empty() {
-            Ok(ModuleResult::ok("configuration already matches desired state"))
+            Ok(ModuleResult::ok(
+                "configuration already matches desired state",
+            ))
         } else {
             Ok(ModuleResult::changed(
                 format!("applied {} config changes", changes.len()),
@@ -327,19 +337,22 @@ impl Module for CapabilityModule {
         })
     }
 
-    async fn execute(&self, args: Value, context: &ModuleContext) -> Result<ModuleResult, ModuleError> {
+    async fn execute(
+        &self,
+        args: Value,
+        context: &ModuleContext,
+    ) -> Result<ModuleResult, ModuleError> {
         let mut added = Vec::new();
         let mut removed = Vec::new();
 
         if let Some(add) = args.get("add").and_then(|v| v.as_array()) {
             for cap in add {
-                let cap_name = cap
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| ModuleError::InvalidArgument {
+                let cap_name = cap.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+                    ModuleError::InvalidArgument {
                         key: "add[].name".into(),
                         reason: "capability must have a name".into(),
-                    })?;
+                    }
+                })?;
 
                 if !context.current_capabilities.contains(&cap_name.to_string()) {
                     added.push(cap_name.to_string());
@@ -361,7 +374,11 @@ impl Module for CapabilityModule {
             Ok(ModuleResult::ok("capabilities already match desired state"))
         } else {
             Ok(ModuleResult::changed(
-                format!("added {}, removed {} capabilities", added.len(), removed.len()),
+                format!(
+                    "added {}, removed {} capabilities",
+                    added.len(),
+                    removed.len()
+                ),
                 serde_json::json!({ "added": added, "removed": removed }),
             ))
         }
@@ -391,7 +408,11 @@ impl Module for ChannelModule {
         "channel"
     }
 
-    async fn execute(&self, args: Value, _context: &ModuleContext) -> Result<ModuleResult, ModuleError> {
+    async fn execute(
+        &self,
+        args: Value,
+        _context: &ModuleContext,
+    ) -> Result<ModuleResult, ModuleError> {
         let mut actions = Vec::new();
 
         if let Some(subs) = args.get("subscribe").and_then(|v| v.as_array()) {
@@ -451,7 +472,11 @@ impl Module for MemoryModule {
         "memory"
     }
 
-    async fn execute(&self, args: Value, context: &ModuleContext) -> Result<ModuleResult, ModuleError> {
+    async fn execute(
+        &self,
+        args: Value,
+        context: &ModuleContext,
+    ) -> Result<ModuleResult, ModuleError> {
         let mut seeded = 0u32;
         let mut cleared = 0u32;
 
@@ -513,13 +538,17 @@ impl Module for HealthModule {
         "health"
     }
 
-    async fn execute(&self, args: Value, context: &ModuleContext) -> Result<ModuleResult, ModuleError> {
-        let desired = args.as_object().ok_or_else(|| {
-            ModuleError::InvalidArgument {
+    async fn execute(
+        &self,
+        args: Value,
+        context: &ModuleContext,
+    ) -> Result<ModuleResult, ModuleError> {
+        let desired = args
+            .as_object()
+            .ok_or_else(|| ModuleError::InvalidArgument {
                 key: "args".into(),
                 reason: "health module expects an object".into(),
-            }
-        })?;
+            })?;
 
         let mut changes = Vec::new();
         for (key, value) in desired {
@@ -567,7 +596,11 @@ impl Module for CommandModule {
         "command"
     }
 
-    async fn execute(&self, args: Value, context: &ModuleContext) -> Result<ModuleResult, ModuleError> {
+    async fn execute(
+        &self,
+        args: Value,
+        context: &ModuleContext,
+    ) -> Result<ModuleResult, ModuleError> {
         let cmd = args
             .get("cmd")
             .and_then(|v| v.as_str())
@@ -629,7 +662,11 @@ impl Module for TemplateModule {
         "template"
     }
 
-    async fn execute(&self, args: Value, context: &ModuleContext) -> Result<ModuleResult, ModuleError> {
+    async fn execute(
+        &self,
+        args: Value,
+        context: &ModuleContext,
+    ) -> Result<ModuleResult, ModuleError> {
         let src = args
             .get("src")
             .and_then(|v| v.as_str())
@@ -742,10 +779,12 @@ mod tests {
 
         let result = module.execute(args, &empty_ctx()).await.unwrap();
         assert!(result.changed);
-        assert!(result.output["added"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("code_review")));
+        assert!(
+            result.output["added"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("code_review"))
+        );
     }
 
     #[tokio::test]
@@ -775,8 +814,7 @@ mod tests {
     async fn command_module_creates_guard() {
         let module = CommandModule;
         let mut ctx = empty_ctx();
-        ctx.current_config
-            .insert("index_built".into(), json!(true));
+        ctx.current_config.insert("index_built".into(), json!(true));
 
         let args = json!({ "cmd": "reindex", "creates": "index_built" });
         let result = module.execute(args, &ctx).await.unwrap();
@@ -804,10 +842,8 @@ mod tests {
         let module = TemplateModule;
         let mut ctx = empty_ctx();
         ctx.vars.insert("role".into(), json!("researcher"));
-        ctx.current_config.insert(
-            "system_prompt".into(),
-            json!("You are a researcher."),
-        );
+        ctx.current_config
+            .insert("system_prompt".into(), json!("You are a researcher."));
 
         let args = json!({
             "src": "You are a {{ role }}.",

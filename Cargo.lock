@@ -762,6 +762,95 @@ dependencies = [
 ]
 
 [[package]]
+name = "daf-example-basic-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "daf-core",
+ "daf-sdk",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "daf-example-configuration"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "daf-configure",
+ "daf-core",
+ "daf-ddal",
+ "daf-runtime",
+ "daf-sdk",
+ "daf-transport",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "daf-example-infrastructure"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "daf-core",
+ "daf-ddal",
+ "daf-provision",
+ "daf-runtime",
+ "daf-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "daf-example-multi-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "daf-core",
+ "daf-ddal",
+ "daf-sdk",
+ "daf-transport",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "daf-example-remote-worker"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "daf-core",
+ "daf-ddal",
+ "daf-runtime",
+ "daf-sdk",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "daf-graph"
 version = "0.1.0"
 dependencies = [
@@ -799,9 +888,11 @@ dependencies = [
  "daf-runtime",
  "daf-sdk",
  "daf-transport",
+ "futures-util",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -921,6 +1012,7 @@ name = "daf-runtime"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "chrono",
  "crossbeam",
  "daf-core",
@@ -930,14 +1022,18 @@ dependencies = [
  "daf-memory",
  "daf-orchestrator",
  "daf-registry",
+ "daf-sdk",
  "daf-transport",
  "dashmap",
  "parking_lot 0.12.5",
+ "ring",
  "serde",
  "serde_json",
+ "sled",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "uuid",

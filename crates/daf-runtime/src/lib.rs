@@ -20,9 +20,11 @@
 
 pub mod bootstrap;
 pub mod config;
+pub mod durable;
 pub mod health;
 pub mod metrics;
 pub mod node;
+pub mod remote;
 pub mod runtime;
 pub mod signal;
 

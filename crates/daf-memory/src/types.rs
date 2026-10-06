@@ -280,11 +280,7 @@ impl Memory {
         }
 
         // Recency: exponential decay over hours since last access.
-        let hours_since_access = self
-            .time_since_access()
-            .num_seconds()
-            .max(0) as f64
-            / 3600.0;
+        let hours_since_access = self.time_since_access().num_seconds().max(0) as f64 / 3600.0;
         let recency = (-hours_since_access / 168.0).exp(); // half-life ~1 week
 
         // Frequency: logarithmic scaling of access count.
@@ -292,7 +288,9 @@ impl Memory {
         let frequency = frequency.min(1.0);
 
         // Weighted combination, normalized.
-        (recency * recency_weight + frequency * frequency_weight + self.importance * importance_weight)
+        (recency * recency_weight
+            + frequency * frequency_weight
+            + self.importance * importance_weight)
             / total_weight
     }
 }
@@ -338,12 +336,10 @@ mod tests {
 
     #[test]
     fn importance_clamped() {
-        let m = Memory::new(MemoryKind::Semantic, json!("fact"))
-            .with_importance(1.5);
+        let m = Memory::new(MemoryKind::Semantic, json!("fact")).with_importance(1.5);
         assert!((m.importance - 1.0).abs() < f64::EPSILON);
 
-        let m = Memory::new(MemoryKind::Semantic, json!("fact"))
-            .with_importance(-0.5);
+        let m = Memory::new(MemoryKind::Semantic, json!("fact")).with_importance(-0.5);
         assert!(m.importance.abs() < f64::EPSILON);
     }
 
@@ -369,10 +365,9 @@ mod tests {
 
     #[test]
     fn relevance_score_within_bounds() {
-        let m = Memory::new(MemoryKind::Semantic, json!("fact"))
-            .with_importance(0.8);
+        let m = Memory::new(MemoryKind::Semantic, json!("fact")).with_importance(0.8);
         let score = m.relevance_score(1.0, 1.0, 1.0);
-        assert!(score >= 0.0 && score <= 1.0);
+        assert!((0.0..=1.0).contains(&score));
     }
 
     #[test]

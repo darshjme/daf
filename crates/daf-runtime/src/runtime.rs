@@ -16,7 +16,7 @@ use daf_core::{DafError, DafResult};
 use crate::config::RuntimeConfig;
 use crate::health::{HealthMonitor, SubsystemHealth, SubsystemKind};
 use crate::metrics::RuntimeMetrics;
-use crate::node::{cluster_leave, Node, PeerTracker};
+use crate::node::{Node, PeerTracker, cluster_leave};
 use crate::signal::ShutdownSignal;
 
 // ---------------------------------------------------------------------------
@@ -55,7 +55,7 @@ impl std::fmt::Display for RuntimeState {
 /// The executable heart of DAF.
 ///
 /// Owns every subsystem handle and coordinates startup, health monitoring,
-/// and shutdown. Construct via [`RuntimeBuilder`] or [`bootstrap`](crate::bootstrap).
+/// and shutdown. Construct via [`RuntimeBuilder`] or [`bootstrap()`](crate::bootstrap()).
 pub struct Runtime {
     /// Node identity.
     node: Node,
@@ -68,6 +68,8 @@ pub struct Runtime {
 
     /// Cooperative shutdown signal.
     shutdown: ShutdownSignal,
+    /// Serialize shutdown callers, including the start loop.
+    shutdown_lock: tokio::sync::Mutex<()>,
 
     /// Health monitor.
     health: HealthMonitor,
@@ -82,11 +84,21 @@ pub struct Runtime {
     created_at: DateTime<Utc>,
 }
 
+// Dropping/cancelling start must not detach supervisor loops.
+struct BackgroundTasks(Vec<tokio::task::JoinHandle<()>>);
+impl Drop for BackgroundTasks {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
 impl Runtime {
     /// Construct a new runtime from a validated configuration.
     ///
     /// This performs minimal initialization. For the full bootstrap sequence
-    /// including subsystem startup, use [`bootstrap`](crate::bootstrap).
+    /// including subsystem startup, use [`bootstrap()`](crate::bootstrap()).
     pub fn new(config: RuntimeConfig) -> DafResult<Self> {
         config.validate()?;
 
@@ -107,6 +119,7 @@ impl Runtime {
             config,
             state: Arc::new(RwLock::new(RuntimeState::Initializing)),
             shutdown,
+            shutdown_lock: tokio::sync::Mutex::new(()),
             health,
             metrics,
             peers,
@@ -120,33 +133,29 @@ impl Runtime {
     /// This method blocks until a shutdown signal is received and the
     /// graceful shutdown completes.
     pub async fn start(&self) -> DafResult<()> {
-        self.transition(RuntimeState::Running)?;
+        {
+            let mut state = self.state.write();
+            if *state != RuntimeState::Initializing {
+                return Err(DafError::Internal(format!(
+                    "runtime cannot start from {state}"
+                )));
+            }
+            *state = RuntimeState::Running;
+        }
         info!(node = %self.node, "runtime started");
 
-        // Spawn the forced-shutdown deadline watcher.
-        let _deadline_handle = self.shutdown.spawn_force_deadline();
-
-        // Spawn health monitoring loop.
-        let health_handle = self.spawn_health_loop();
-
-        // Spawn metrics snapshot loop.
-        let metrics_handle = self.spawn_metrics_loop();
-
-        // Spawn config reload listener.
-        let reload_handle = self.spawn_reload_listener();
+        let _background = BackgroundTasks(vec![
+            self.shutdown.spawn_force_deadline(),
+            self.spawn_health_loop(),
+            self.spawn_metrics_loop(),
+            self.spawn_reload_listener(),
+        ]);
 
         // Block on signal listener — this is the main event loop.
         self.shutdown.listen_for_signals().await;
 
         // Shutdown was triggered.
-        self.shutdown_inner().await?;
-
-        // Cancel background tasks.
-        health_handle.abort();
-        metrics_handle.abort();
-        reload_handle.abort();
-
-        Ok(())
+        self.shutdown_inner().await
     }
 
     /// Initiate graceful shutdown.
@@ -159,6 +168,7 @@ impl Runtime {
 
     /// Internal shutdown sequence.
     async fn shutdown_inner(&self) -> DafResult<()> {
+        let _guard = self.shutdown_lock.lock().await;
         if *self.state.read() == RuntimeState::Stopped {
             return Ok(());
         }
@@ -226,11 +236,11 @@ impl Runtime {
                 tokio::select! {
                     _ = tokio::time::sleep(interval) => {
                         let reports = vec![
-                            SubsystemHealth::healthy(SubsystemKind::Transport),
-                            SubsystemHealth::healthy(SubsystemKind::Logger),
-                            SubsystemHealth::healthy(SubsystemKind::Memory),
-                            SubsystemHealth::healthy(SubsystemKind::Registry),
-                            SubsystemHealth::healthy(SubsystemKind::Orchestrator),
+                            SubsystemHealth::unknown(SubsystemKind::Transport),
+                            SubsystemHealth::unknown(SubsystemKind::Logger),
+                            SubsystemHealth::unknown(SubsystemKind::Memory),
+                            SubsystemHealth::unknown(SubsystemKind::Registry),
+                            SubsystemHealth::unknown(SubsystemKind::Orchestrator),
                         ];
                         health.update(reports);
                         metrics.health_check_performed();
@@ -273,14 +283,12 @@ impl Runtime {
     /// Spawn the config reload listener.
     fn spawn_reload_listener(&self) -> tokio::task::JoinHandle<()> {
         let shutdown_signal = self.shutdown.clone();
-        let metrics = self.metrics.clone();
-
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = shutdown_signal.wait_reload() => {
                         info!("configuration reload triggered (not yet implemented)");
-                        metrics.config_reloaded();
+                        // Do not count an unimplemented reload as successful.
                         // TODO: re-read config file and apply changes.
                     }
                     _ = shutdown_signal.wait() => {
@@ -349,6 +357,7 @@ impl Runtime {
         let valid = match (*current, target) {
             (RuntimeState::Initializing, RuntimeState::Running) => true,
             (RuntimeState::Running, RuntimeState::ShuttingDown) => true,
+            (RuntimeState::Initializing, RuntimeState::ShuttingDown) => true,
             (RuntimeState::ShuttingDown, RuntimeState::Stopped) => true,
             // Allow idempotent transitions.
             (s, t) if s == t => true,
@@ -523,6 +532,22 @@ impl Default for RuntimeBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn runtime_start_exits_on_programmatic_shutdown() {
+        let runtime = Arc::new(RuntimeBuilder::new().build().unwrap());
+        let running = runtime.clone();
+        let task = tokio::spawn(async move { running.start().await });
+        tokio::task::yield_now().await;
+        runtime.shutdown().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(runtime.state(), RuntimeState::Stopped);
+        assert!(!runtime.shutdown_signal().is_forced());
+    }
 
     #[test]
     fn runtime_new_with_valid_config() {

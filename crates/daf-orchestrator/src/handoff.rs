@@ -17,7 +17,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tracing::info;
 use uuid::Uuid;
 
 use daf_core::AgentId;
@@ -136,11 +136,7 @@ pub struct Handoff {
 
 impl Handoff {
     /// Create a new handoff from one agent to another with the given context.
-    pub fn new(
-        from: AgentId,
-        to: AgentId,
-        context: serde_json::Value,
-    ) -> Self {
+    pub fn new(from: AgentId, to: AgentId, context: serde_json::Value) -> Self {
         Self {
             id: HandoffId::new(),
             from_agent: from,
@@ -170,7 +166,11 @@ impl Handoff {
     }
 
     /// Add a single conversation entry.
-    pub fn add_conversation_entry(&mut self, speaker: impl Into<String>, content: impl Into<String>) {
+    pub fn add_conversation_entry(
+        &mut self,
+        speaker: impl Into<String>,
+        content: impl Into<String>,
+    ) {
         self.conversation_history.push(ConversationEntry {
             speaker: speaker.into(),
             content: content.into(),
@@ -309,11 +309,7 @@ impl HandoffManager {
     pub fn outbound_handoffs(&self, agent_id: &AgentId) -> Vec<HandoffRecord> {
         self.outbound_index
             .get(agent_id)
-            .map(|ids| {
-                ids.iter()
-                    .filter_map(|id| self.get(id))
-                    .collect()
-            })
+            .map(|ids| ids.iter().filter_map(|id| self.get(id)).collect())
             .unwrap_or_default()
     }
 
@@ -321,11 +317,7 @@ impl HandoffManager {
     pub fn inbound_handoffs(&self, agent_id: &AgentId) -> Vec<HandoffRecord> {
         self.inbound_index
             .get(agent_id)
-            .map(|ids| {
-                ids.iter()
-                    .filter_map(|id| self.get(id))
-                    .collect()
-            })
+            .map(|ids| ids.iter().filter_map(|id| self.get(id)).collect())
             .unwrap_or_default()
     }
 
@@ -421,7 +413,10 @@ mod tests {
 
         assert!(handoff.task_state.is_some());
         assert_eq!(handoff.memory_references.len(), 2);
-        assert_eq!(handoff.metadata.get("reason").unwrap(), "specialist routing");
+        assert_eq!(
+            handoff.metadata.get("reason").unwrap(),
+            "specialist routing"
+        );
     }
 
     #[test]
@@ -466,7 +461,11 @@ mod tests {
         let mut h1 = Handoff::new(AgentId::new(), AgentId::new(), serde_json::json!("a"));
         h1.complete();
         mgr.record(h1);
-        mgr.record(Handoff::new(AgentId::new(), AgentId::new(), serde_json::json!("b")));
+        mgr.record(Handoff::new(
+            AgentId::new(),
+            AgentId::new(),
+            serde_json::json!("b"),
+        ));
 
         assert_eq!(mgr.by_state(HandoffState::Completed).len(), 1);
         assert_eq!(mgr.by_state(HandoffState::Initiated).len(), 1);
@@ -475,8 +474,16 @@ mod tests {
     #[test]
     fn manager_in_flight() {
         let mgr = HandoffManager::new();
-        mgr.record(Handoff::new(AgentId::new(), AgentId::new(), serde_json::json!("a")));
-        let id = mgr.record(Handoff::new(AgentId::new(), AgentId::new(), serde_json::json!("b")));
+        mgr.record(Handoff::new(
+            AgentId::new(),
+            AgentId::new(),
+            serde_json::json!("a"),
+        ));
+        let id = mgr.record(Handoff::new(
+            AgentId::new(),
+            AgentId::new(),
+            serde_json::json!("b"),
+        ));
         mgr.update(&id, |h| h.complete());
 
         assert_eq!(mgr.in_flight(), 1);
@@ -485,9 +492,17 @@ mod tests {
     #[test]
     fn audit_trail_sorted() {
         let mgr = HandoffManager::new();
-        mgr.record(Handoff::new(AgentId::new(), AgentId::new(), serde_json::json!("first")));
+        mgr.record(Handoff::new(
+            AgentId::new(),
+            AgentId::new(),
+            serde_json::json!("first"),
+        ));
         std::thread::sleep(std::time::Duration::from_millis(2));
-        mgr.record(Handoff::new(AgentId::new(), AgentId::new(), serde_json::json!("second")));
+        mgr.record(Handoff::new(
+            AgentId::new(),
+            AgentId::new(),
+            serde_json::json!("second"),
+        ));
 
         let trail = mgr.audit_trail();
         assert_eq!(trail.len(), 2);

@@ -57,5 +57,5 @@ pub use handler::{Handler, HandlerChain};
 pub use inventory::{AgentEntry, Group, Inventory, InventoryLoader};
 pub use module::{Module, ModuleContext, ModuleError, ModuleRegistry, ModuleResult};
 pub use playbook::{AgentSelector, Play, Playbook, RoleRef, TaskDef};
-pub use role::{resolve_dependency_order, Role, RoleDependency, RoleLoader};
+pub use role::{Role, RoleDependency, RoleLoader, resolve_dependency_order};
 pub use vars::{VarManager, VarScope};

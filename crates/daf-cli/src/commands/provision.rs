@@ -104,24 +104,18 @@ struct ResourceChange {
 #[derive(Clone, Copy)]
 enum ChangeAction {
     Create,
-    Update,
-    Destroy,
 }
 
 impl ChangeAction {
     fn label(&self) -> &'static str {
         match self {
             Self::Create => "create",
-            Self::Update => "update",
-            Self::Destroy => "destroy",
         }
     }
 
     fn styled(&self) -> String {
         match self {
             Self::Create => format!("{}", style("+ create").green().bold()),
-            Self::Update => format!("{}", style("~ update").yellow().bold()),
-            Self::Destroy => format!("{}", style("- destroy").red().bold()),
         }
     }
 }
@@ -199,14 +193,8 @@ fn print_plan(topo_name: &str, changes: &[ResourceChange]) {
         .iter()
         .filter(|c| matches!(c.action, ChangeAction::Create))
         .count();
-    let updates = changes
-        .iter()
-        .filter(|c| matches!(c.action, ChangeAction::Update))
-        .count();
-    let destroys = changes
-        .iter()
-        .filter(|c| matches!(c.action, ChangeAction::Destroy))
-        .count();
+    let updates = 0;
+    let destroys = 0;
 
     eprintln!(
         "\nPlan: {} to create, {} to update, {} to destroy",

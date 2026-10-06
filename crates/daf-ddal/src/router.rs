@@ -102,11 +102,12 @@ impl fmt::Display for RouteEntry {
 // ---------------------------------------------------------------------------
 
 /// Load-balancing strategy for distributing messages across a group of agents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BalancingStrategy {
     /// Cycle through agents in order. Simple, predictable, no hot-spots on
     /// uniform workloads.
+    #[default]
     RoundRobin,
     /// Pick the agent with the fewest pending messages. Adapts to heterogeneous
     /// processing speeds at the cost of tracking in-flight counts.
@@ -117,12 +118,6 @@ pub enum BalancingStrategy {
     /// Pick a random agent. Statistically uniform but can produce short-term
     /// imbalance.
     Random,
-}
-
-impl Default for BalancingStrategy {
-    fn default() -> Self {
-        Self::RoundRobin
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -175,19 +170,19 @@ impl RoutingTable {
 
     /// Remove a specific route (by channel_id) to an agent.
     pub fn remove_route(&self, agent: &AgentId, channel_id: u32) -> bool {
-        if let Some(mut entries) = self.routes.get_mut(agent) {
-            let before = entries.len();
-            entries.retain(|e| e.channel_id != channel_id);
-            let removed = entries.len() < before;
-
-            // If no routes remain, remove the agent entirely.
-            if entries.is_empty() {
-                drop(entries); // release the DashMap ref before removing
-                self.routes.remove(agent);
+        match self.routes.entry(*agent) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                let before = entry.get().len();
+                entry
+                    .get_mut()
+                    .retain(|route| route.channel_id != channel_id);
+                let removed = entry.get().len() < before;
+                if entry.get().is_empty() {
+                    entry.remove();
+                }
+                removed
             }
-            removed
-        } else {
-            false
+            dashmap::mapref::entry::Entry::Vacant(_) => false,
         }
     }
 
@@ -198,9 +193,9 @@ impl RoutingTable {
 
     /// Look up the best (lowest-priority) route to an agent.
     pub fn best_route(&self, agent: &AgentId) -> Option<RouteEntry> {
-        self.routes.get(agent).and_then(|entries| {
-            entries.iter().min_by_key(|e| e.priority).cloned()
-        })
+        self.routes
+            .get(agent)
+            .and_then(|entries| entries.iter().min_by_key(|e| e.priority).cloned())
     }
 
     /// Number of distinct agents in the table.
@@ -210,30 +205,18 @@ impl RoutingTable {
 
     /// Total number of route entries across all agents.
     pub fn route_count(&self) -> usize {
-        self.routes
-            .iter()
-            .map(|entry| entry.value().len())
-            .sum()
+        self.routes.iter().map(|entry| entry.value().len()).sum()
     }
 
     /// Remove all stale routes older than `timeout`.
     pub fn evict_stale(&self, timeout: chrono::Duration) -> usize {
         let mut evicted = 0;
-        let mut empty_agents = Vec::new();
-
-        for mut entry in self.routes.iter_mut() {
-            let before = entry.value().len();
-            entry.value_mut().retain(|e| !e.is_stale(timeout));
-            evicted += before - entry.value().len();
-            if entry.value().is_empty() {
-                empty_agents.push(*entry.key());
-            }
-        }
-
-        for agent in empty_agents {
-            self.routes.remove(&agent);
-        }
-
+        self.routes.retain(|_, entries| {
+            let before = entries.len();
+            entries.retain(|route| !route.is_stale(timeout));
+            evicted += before - entries.len();
+            !entries.is_empty()
+        });
         evicted
     }
 

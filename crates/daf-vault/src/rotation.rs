@@ -209,12 +209,9 @@ impl RotationManager {
     pub async fn rotate_secret(&self, secret_name: &str) -> VaultResult<SecretRef> {
         let generator = {
             let gens = self.generators.read();
-            gens.get(secret_name)
-                .cloned()
-                .ok_or_else(|| VaultError::Rotation(format!(
-                    "no generator registered for '{}'",
-                    secret_name
-                )))?
+            gens.get(secret_name).cloned().ok_or_else(|| {
+                VaultError::Rotation(format!("no generator registered for '{}'", secret_name))
+            })?
         };
 
         // Get the current secret to know its kind.
@@ -233,7 +230,8 @@ impl RotationManager {
             let entries = archive.entry(secret_name.to_string()).or_default();
             entries.push(GraceEntry {
                 _old_value: current.encrypted_value.clone(),
-                expires_at: Utc::now() + chrono::Duration::from_std(grace_duration).unwrap_or_default(),
+                expires_at: Utc::now()
+                    + chrono::Duration::from_std(grace_duration).unwrap_or_default(),
             });
         }
 
@@ -241,7 +239,11 @@ impl RotationManager {
         let new_value = generator.generate(secret_name, &current.kind).await?;
         let new_ref = self.store.rotate_secret(secret_name, &new_value).await?;
 
-        info!(name = secret_name, version = new_ref.version, "secret rotated");
+        info!(
+            name = secret_name,
+            version = new_ref.version,
+            "secret rotated"
+        );
 
         // Notify listeners.
         let event = RotationEvent {
@@ -282,17 +284,12 @@ impl RotationManager {
                         age
                     };
 
-                    let max_age =
-                        chrono::Duration::from_std(policy.max_age).unwrap_or_default();
+                    let max_age = chrono::Duration::from_std(policy.max_age).unwrap_or_default();
 
                     if effective_age > max_age {
                         match self.rotate_secret(name).await {
                             Ok(new_ref) => {
-                                debug!(
-                                    name,
-                                    new_version = new_ref.version,
-                                    "auto-rotated secret"
-                                );
+                                debug!(name, new_version = new_ref.version, "auto-rotated secret");
                                 rotated.push(name.clone());
                             }
                             Err(e) => {
@@ -363,7 +360,11 @@ mod tests {
     use crate::secret::AccessPolicy;
     use crate::store::InMemoryVaultStore;
 
-    async fn setup() -> (Arc<InMemoryVaultStore>, Arc<RotationManager>, broadcast::Receiver<RotationEvent>) {
+    async fn setup() -> (
+        Arc<InMemoryVaultStore>,
+        Arc<RotationManager>,
+        broadcast::Receiver<RotationEvent>,
+    ) {
         let audit = Arc::new(AuditLog::new());
         let store = Arc::new(InMemoryVaultStore::new(b"pass", audit).unwrap());
         let (mgr, rx) = RotationManager::new(store.clone());
@@ -375,7 +376,12 @@ mod tests {
         let (store, mgr, _rx) = setup().await;
 
         store
-            .store_secret("rotate_me", SecretKind::ApiKey, b"old-key", AccessPolicy::AnyAgent)
+            .store_secret(
+                "rotate_me",
+                SecretKind::ApiKey,
+                b"old-key",
+                AccessPolicy::AnyAgent,
+            )
             .await
             .unwrap();
 
@@ -399,7 +405,12 @@ mod tests {
         let (store, mgr, mut rx) = setup().await;
 
         store
-            .store_secret("notified", SecretKind::Token, b"tok", AccessPolicy::AnyAgent)
+            .store_secret(
+                "notified",
+                SecretKind::Token,
+                b"tok",
+                AccessPolicy::AnyAgent,
+            )
             .await
             .unwrap();
 

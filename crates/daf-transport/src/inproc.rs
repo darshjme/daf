@@ -31,7 +31,7 @@ const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
 /// Data is passed as `Bytes` — when the sender already holds a `Bytes` buffer,
 /// this is zero-copy.
 pub struct InProcConnection {
-    tx: mpsc::Sender<Bytes>,
+    tx: Option<mpsc::Sender<Bytes>>,
     rx: mpsc::Receiver<Bytes>,
     /// Buffered partial read from a previous `read` call.
     pending: Vec<u8>,
@@ -48,22 +48,36 @@ impl InProcConnection {
         let (tx_b, rx_a) = mpsc::channel(capacity);
 
         let a = Self {
-            tx: tx_a,
+            tx: Some(tx_a),
             rx: rx_a,
             pending: Vec::new(),
             info: ConnectionInfo::new(Some("inproc:a".into())),
         };
 
         let b = Self {
-            tx: tx_b,
+            tx: Some(tx_b),
             rx: rx_b,
             pending: Vec::new(),
             info: ConnectionInfo::new(Some("inproc:b".into())),
         };
 
         (
-            Self { info: { let mut i = a.info; i.state = ConnectionState::Connected; i }, ..a },
-            Self { info: { let mut i = b.info; i.state = ConnectionState::Connected; i }, ..b },
+            Self {
+                info: {
+                    let mut i = a.info;
+                    i.state = ConnectionState::Connected;
+                    i
+                },
+                ..a
+            },
+            Self {
+                info: {
+                    let mut i = b.info;
+                    i.state = ConnectionState::Connected;
+                    i
+                },
+                ..b
+            },
         )
     }
 }
@@ -71,6 +85,12 @@ impl InProcConnection {
 #[async_trait]
 impl Connection for InProcConnection {
     async fn read(&mut self, buf: &mut [u8]) -> TransportResult<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.info.state == ConnectionState::Closed {
+            return Ok(0);
+        }
         // Drain any leftover bytes from a previous oversized message.
         if !self.pending.is_empty() {
             let n = std::cmp::min(buf.len(), self.pending.len());
@@ -98,19 +118,19 @@ impl Connection for InProcConnection {
     }
 
     async fn write(&mut self, data: &[u8]) -> TransportResult<()> {
-        let bytes = Bytes::copy_from_slice(data);
-        self.tx
-            .send(bytes)
-            .await
-            .map_err(|_| TransportError::ChannelError("receiver dropped".into()))?;
-        self.info.bytes_sent += data.len() as u64;
-        Ok(())
+        self.write_bytes(Bytes::copy_from_slice(data)).await
     }
 
     async fn write_bytes(&mut self, data: Bytes) -> TransportResult<()> {
+        let tx = self.tx.as_ref().ok_or(TransportError::ConnectionClosed)?;
+        if self.info.state != ConnectionState::Connected {
+            return Err(TransportError::ConnectionClosed);
+        }
+        if data.is_empty() {
+            return Ok(());
+        }
         let len = data.len();
-        self.tx
-            .send(data)
+        tx.send(data)
             .await
             .map_err(|_| TransportError::ChannelError("receiver dropped".into()))?;
         self.info.bytes_sent += len as u64;
@@ -125,7 +145,9 @@ impl Connection for InProcConnection {
     async fn close(&mut self) -> TransportResult<()> {
         self.info.state = ConnectionState::Closed;
         self.rx.close();
-        // Dropping tx will signal the peer.
+        // Release our sender now, so the peer sees EOF without waiting for Drop.
+        self.tx.take();
+        self.pending.clear();
         tracing::debug!(id = %self.info.id, "InProc connection closed");
         Ok(())
     }
@@ -135,7 +157,8 @@ impl Connection for InProcConnection {
     }
 
     fn is_alive(&self) -> bool {
-        self.info.state == ConnectionState::Connected && !self.tx.is_closed()
+        self.info.state == ConnectionState::Connected
+            && self.tx.as_ref().is_some_and(|tx| !tx.is_closed())
     }
 
     fn info(&self) -> &ConnectionInfo {
@@ -154,7 +177,13 @@ impl Connection for InProcConnection {
 fn channel_key(a: &str, b: &str) -> String {
     let mut parts = [a, b];
     parts.sort();
-    format!("{}:{}", parts[0], parts[1])
+    format!(
+        "{}:{}{}:{}",
+        parts[0].len(),
+        parts[0],
+        parts[1].len(),
+        parts[1]
+    )
 }
 
 /// A registry of named in-process channels between agent pairs.
@@ -195,17 +224,16 @@ impl InProcBus {
     pub fn connect(&self, from: &str, to: &str) -> InProcConnection {
         let key = channel_key(from, to);
 
-        // Try to take the pending end.
-        if let Some((_, conn)) = self.pending.remove(&key) {
-            tracing::debug!(from = %from, to = %to, "InProcBus: matched existing channel");
-            return conn;
+        // Entry locks the shard across matching/creation, so simultaneous callers
+        // cannot overwrite and strand a pending endpoint.
+        match self.pending.entry(key) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => entry.remove(),
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let (a, b) = InProcConnection::pair(self.capacity);
+                entry.insert(b);
+                a
+            }
         }
-
-        // No pending end — create a new pair, return one, store the other.
-        let (a, b) = InProcConnection::pair(self.capacity);
-        self.pending.insert(key, b);
-        tracing::debug!(from = %from, to = %to, "InProcBus: created new channel pair");
-        a
     }
 
     /// Return the number of pending (unmatched) channel ends.
@@ -254,6 +282,27 @@ impl InProcTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn empty_writes_do_not_look_like_eof_and_closed_writes_fail() {
+        let (mut a, mut b) = InProcConnection::pair(16);
+        a.write(b"").await.unwrap();
+        a.write(b"x").await.unwrap();
+        let mut buf = [0; 8];
+        assert_eq!(b.read(&mut buf).await.unwrap(), 1);
+        a.close().await.unwrap();
+        assert!(matches!(
+            a.write(b"x").await,
+            Err(TransportError::ConnectionClosed)
+        ));
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), b.read(&mut buf))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+    }
 
     #[tokio::test]
     async fn inproc_pair_roundtrip() {
@@ -309,7 +358,6 @@ mod tests {
         assert!(!a.is_alive());
 
         // b should eventually get EOF.
-        drop(a);
         let mut buf = [0u8; 8];
         let n = b.read(&mut buf).await.unwrap();
         assert_eq!(n, 0);
@@ -334,7 +382,7 @@ mod tests {
     #[test]
     fn channel_key_is_canonical() {
         assert_eq!(channel_key("a", "b"), channel_key("b", "a"));
-        assert_eq!(channel_key("x", "y"), "x:y");
+        assert_ne!(channel_key("a:b", "c"), channel_key("a", "b:c"));
     }
 
     #[test]

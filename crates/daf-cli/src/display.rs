@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use comfy_table::{presets, Attribute, Cell, CellAlignment, Color, ContentArrangement, Table};
+use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table, presets};
 use console::style;
 
 // ---------------------------------------------------------------------------

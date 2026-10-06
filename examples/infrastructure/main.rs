@@ -11,14 +11,16 @@
 //! - Declaring channels (DDAL links) between pools
 //! - Planning: computing the diff between desired and current state
 //! - Applying: creating/updating/destroying resources to match desired state
-//! - State management: persisting and loading provisioned resource state
+//! - State management: serializing and restoring simulated resource state
+//!
+//! This is a standalone in-memory planning simulation with local definition types.
+//! It does not provision machines or invoke daf-provision providers.
 //!
 //! Run with:
 //!   cargo run -p daf-example-infrastructure
 
 use std::collections::HashMap;
 use std::fmt;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -161,6 +163,7 @@ enum PlanAction {
         name: String,
         from: String,
         to: String,
+        buffer_size: u32,
     },
     UpdateChannel {
         name: String,
@@ -175,20 +178,44 @@ enum PlanAction {
 impl fmt::Display for PlanAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::CreatePool { name, kind, replicas } => {
+            Self::CreatePool {
+                name,
+                kind,
+                replicas,
+            } => {
                 write!(f, "  + pool.{name} ({kind}, {replicas} replicas)")
             }
-            Self::UpdatePool { name, old_replicas, new_replicas } => {
-                write!(f, "  ~ pool.{name} (replicas: {old_replicas} -> {new_replicas})")
+            Self::UpdatePool {
+                name,
+                old_replicas,
+                new_replicas,
+            } => {
+                write!(
+                    f,
+                    "  ~ pool.{name} (replicas: {old_replicas} -> {new_replicas})"
+                )
             }
-            Self::DestroyPool { name, current_replicas } => {
-                write!(f, "  - pool.{name} ({current_replicas} agents will be terminated)")
+            Self::DestroyPool {
+                name,
+                current_replicas,
+            } => {
+                write!(
+                    f,
+                    "  - pool.{name} ({current_replicas} agents will be terminated)"
+                )
             }
-            Self::CreateChannel { name, from, to } => {
+            Self::CreateChannel { name, from, to, .. } => {
                 write!(f, "  + channel.{name} ({from} -> {to})")
             }
-            Self::UpdateChannel { name, old_buffer, new_buffer } => {
-                write!(f, "  ~ channel.{name} (buffer: {old_buffer} -> {new_buffer})")
+            Self::UpdateChannel {
+                name,
+                old_buffer,
+                new_buffer,
+            } => {
+                write!(
+                    f,
+                    "  ~ channel.{name} (buffer: {old_buffer} -> {new_buffer})"
+                )
             }
             Self::DestroyChannel { name } => {
                 write!(f, "  - channel.{name}")
@@ -288,7 +315,8 @@ impl Provisioner {
         }
 
         // Check for pools that should be destroyed (exist in state but not in topology)
-        let desired_pool_names: Vec<&str> = topology.pools.iter().map(|p| p.name.as_str()).collect();
+        let desired_pool_names: Vec<&str> =
+            topology.pools.iter().map(|p| p.name.as_str()).collect();
         for (name, pool) in &self.state.pools {
             if !desired_pool_names.contains(&name.as_str()) {
                 actions.push(PlanAction::DestroyPool {
@@ -308,6 +336,7 @@ impl Provisioner {
                         name: channel.name.clone(),
                         from: channel.from.clone(),
                         to: channel.to.clone(),
+                        buffer_size: channel.buffer_size,
                     });
                     creates += 1;
                 }
@@ -344,11 +373,14 @@ impl Provisioner {
     fn apply(&mut self, plan: &Plan) -> Result<(), String> {
         for action in &plan.actions {
             match action {
-                PlanAction::CreatePool { name, kind, replicas } => {
+                PlanAction::CreatePool {
+                    name,
+                    kind,
+                    replicas,
+                } => {
                     info!(pool = name, replicas, "Creating agent pool");
-                    let agent_ids: Vec<String> = (0..*replicas)
-                        .map(|i| format!("{name}-{i}"))
-                        .collect();
+                    let agent_ids: Vec<String> =
+                        (0..*replicas).map(|i| format!("{name}-{i}")).collect();
                     self.state.pools.insert(
                         name.clone(),
                         ProvisionedPool {
@@ -360,7 +392,9 @@ impl Provisioner {
                         },
                     );
                 }
-                PlanAction::UpdatePool { name, new_replicas, .. } => {
+                PlanAction::UpdatePool {
+                    name, new_replicas, ..
+                } => {
                     info!(pool = name, new_replicas, "Scaling agent pool");
                     if let Some(pool) = self.state.pools.get_mut(name) {
                         // Scale up: add new agent IDs
@@ -378,7 +412,12 @@ impl Provisioner {
                     info!(pool = name, "Destroying agent pool");
                     self.state.pools.remove(name);
                 }
-                PlanAction::CreateChannel { name, from, to } => {
+                PlanAction::CreateChannel {
+                    name,
+                    from,
+                    to,
+                    buffer_size,
+                } => {
                     info!(channel = name, from, to, "Creating channel");
                     self.state.channels.insert(
                         name.clone(),
@@ -386,11 +425,13 @@ impl Provisioner {
                             name: name.clone(),
                             from: from.clone(),
                             to: to.clone(),
-                            buffer_size: 64, // default
+                            buffer_size: *buffer_size,
                         },
                     );
                 }
-                PlanAction::UpdateChannel { name, new_buffer, .. } => {
+                PlanAction::UpdateChannel {
+                    name, new_buffer, ..
+                } => {
                     info!(channel = name, new_buffer, "Updating channel");
                     if let Some(ch) = self.state.channels.get_mut(name) {
                         ch.buffer_size = *new_buffer;
@@ -423,8 +464,7 @@ impl Provisioner {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -469,10 +509,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     max_connections: 16,
                     max_queue_depth: 64,
                 },
-                labels: HashMap::from([
-                    ("stage".into(), "2".into()),
-                    ("team".into(), "ml".into()),
-                ]),
+                labels: HashMap::from([("stage".into(), "2".into()), ("team".into(), "ml".into())]),
             },
             AgentPool {
                 name: "reporters".into(),
@@ -539,6 +576,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\nProvisioned State:");
     println!("{}", provisioner.export_state());
+    // Demonstrate an actual serialization round trip, without writing disk state.
+    provisioner = Provisioner::with_state(serde_json::from_str(&provisioner.export_state())?);
 
     // -----------------------------------------------------------------------
     // 3. Modify the topology — scale up researchers, remove reporters.
@@ -555,7 +594,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     updated_topology.pools.retain(|p| p.name != "reporters");
 
     // Remove the channel to reporters
-    updated_topology.channels.retain(|c| c.name != "analysis-to-report");
+    updated_topology
+        .channels
+        .retain(|c| c.name != "analysis-to-report");
 
     // Add a new pool: reviewers
     updated_topology.pools.push(AgentPool {

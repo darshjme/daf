@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, instrument, warn};
 
 use crate::error::MemoryResult;
-use crate::recall::{execute_recall, RecallQuery, RecallResult};
+use crate::recall::{RecallQuery, RecallResult, execute_recall};
 use crate::store::MemoryStore;
 use crate::types::{Memory, MemoryId, MemoryKind, MemoryMetrics, MemoryTier};
 
@@ -166,6 +166,9 @@ impl MemoryManager {
             return Ok(None);
         };
 
+        if memory.is_expired() {
+            return Ok(None);
+        }
         memory.record_access();
         let new_tier = self.check_promotion(&memory);
         if new_tier != memory.tier {
@@ -301,11 +304,7 @@ impl MemoryManager {
     }
 
     fn check_demotion(&self, memory: &Memory) -> MemoryTier {
-        let hours_since_access = memory
-            .time_since_access()
-            .num_seconds()
-            .max(0) as f64
-            / 3600.0;
+        let hours_since_access = memory.time_since_access().num_seconds().max(0) as f64 / 3600.0;
 
         match memory.tier {
             MemoryTier::Hot => {
@@ -369,26 +368,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expired_memories_are_hidden_before_compaction() {
+        let mgr = make_manager();
+        let mut memory = Memory::new(MemoryKind::Semantic, json!("expired"));
+        memory.ttl = Some(chrono::Duration::seconds(-1));
+        let id = mgr.store_memory(memory).await.unwrap();
+        assert!(mgr.get(&id).await.unwrap().is_none());
+        let recalled = mgr.recall(&RecallQuery::new()).await.unwrap();
+        assert!(recalled.is_empty());
+        assert_eq!(recalled.total_matches, 0);
+    }
+
+    #[tokio::test]
     async fn initial_tier_based_on_importance() {
         let mgr = make_manager();
 
         // High importance -> Hot.
-        let m = Memory::new(MemoryKind::Semantic, json!("critical"))
-            .with_importance(0.95);
+        let m = Memory::new(MemoryKind::Semantic, json!("critical")).with_importance(0.95);
         let id = mgr.store_memory(m).await.unwrap();
         let retrieved = mgr.store.retrieve(&id).await.unwrap().unwrap();
         assert_eq!(retrieved.tier, MemoryTier::Hot);
 
         // Working kind -> always Hot.
-        let m = Memory::new(MemoryKind::Working, json!("context"))
-            .with_importance(0.1);
+        let m = Memory::new(MemoryKind::Working, json!("context")).with_importance(0.1);
         let id = mgr.store_memory(m).await.unwrap();
         let retrieved = mgr.store.retrieve(&id).await.unwrap().unwrap();
         assert_eq!(retrieved.tier, MemoryTier::Hot);
 
         // Normal importance -> Warm.
-        let m = Memory::new(MemoryKind::Semantic, json!("normal"))
-            .with_importance(0.5);
+        let m = Memory::new(MemoryKind::Semantic, json!("normal")).with_importance(0.5);
         let id = mgr.store_memory(m).await.unwrap();
         let retrieved = mgr.store.retrieve(&id).await.unwrap().unwrap();
         assert_eq!(retrieved.tier, MemoryTier::Warm);
@@ -406,8 +414,8 @@ mod tests {
     #[tokio::test]
     async fn compact_expires_ttl_memories() {
         let mgr = make_manager();
-        let mut mem = Memory::new(MemoryKind::Episodic, json!("ephemeral"))
-            .with_ttl(Duration::seconds(1));
+        let mut mem =
+            Memory::new(MemoryKind::Episodic, json!("ephemeral")).with_ttl(Duration::seconds(1));
         // Backdate creation so TTL has expired.
         mem.created_at = chrono::Utc::now() - Duration::seconds(10);
         let id = mgr.store_memory(mem).await.unwrap();
@@ -425,8 +433,7 @@ mod tests {
         };
         let mgr = MemoryManager::with_config(Arc::new(InMemoryStore::new()), config);
 
-        let mut mem = Memory::new(MemoryKind::Semantic, json!("stale"))
-            .with_importance(0.95);
+        let mut mem = Memory::new(MemoryKind::Semantic, json!("stale")).with_importance(0.95);
         mem.last_accessed = chrono::Utc::now() - Duration::hours(1);
         let id = mgr.store_memory(mem).await.unwrap();
 

@@ -243,8 +243,7 @@ impl KBExtractor {
                     }
                 });
 
-                let content =
-                    format!("Error: {}{}", error_text, resolution.unwrap_or_default());
+                let content = format!("Error: {}{}", error_text, resolution.unwrap_or_default());
 
                 out.push(KnowledgeEntry::new(
                     log.conversation_id,
@@ -438,15 +437,16 @@ mod tests {
         let log = conv_with_messages(&[
             ("Let's discuss the approach", LogLevel::Info),
             ("I think we should use RocksDB", LogLevel::Info),
-            ("Agreed — decided to go with RocksDB for persistence", LogLevel::Info),
+            (
+                "Agreed — decided to go with RocksDB for persistence",
+                LogLevel::Info,
+            ),
         ]);
 
         let ext = KBExtractor::new();
         let decisions = ext.extract_decisions(&log);
         assert!(!decisions.is_empty());
-        assert!(decisions
-            .iter()
-            .any(|d| d.content.contains("decided to")));
+        assert!(decisions.iter().any(|d| d.content.contains("decided to")));
     }
 
     #[test]
@@ -465,9 +465,10 @@ mod tests {
 
     #[test]
     fn builtin_rules_detect_security() {
-        let log = conv_with_messages(&[
-            ("Found a potential SQL injection vulnerability in the auth module", LogLevel::Warn),
-        ]);
+        let log = conv_with_messages(&[(
+            "Found a potential SQL injection vulnerability in the auth module",
+            LogLevel::Warn,
+        )]);
 
         let ext = KBExtractor::new();
         let all = ext.extract_from_conversation(&log);
@@ -495,12 +496,7 @@ mod tests {
 
     #[test]
     fn extraction_rule_case_insensitive() {
-        let rule = ExtractionRule::new(
-            "test",
-            vec!["ERROR".into()],
-            KnowledgeCategory::Error,
-            0.5,
-        );
+        let rule = ExtractionRule::new("test", vec!["ERROR".into()], KnowledgeCategory::Error, 0.5);
         assert!(rule.matches("there was an error here"));
         assert!(rule.matches("ERROR: something broke"));
         assert!(!rule.matches("everything is fine"));

@@ -13,7 +13,7 @@
 //! defaults to [`Bincode`](PayloadFormat::Bincode).
 
 use bytes::Bytes;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 use daf_core::{DafError, DafResult};
 
@@ -197,8 +197,7 @@ mod tests {
     fn msgpack_round_trip() {
         let payload = sample_payload();
         let bytes = serialize_payload(&payload, PayloadFormat::MessagePack).unwrap();
-        let back: TestPayload =
-            deserialize_payload(&bytes, PayloadFormat::MessagePack).unwrap();
+        let back: TestPayload = deserialize_payload(&bytes, PayloadFormat::MessagePack).unwrap();
         assert_eq!(back, payload);
     }
 

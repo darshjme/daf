@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 // ---------------------------------------------------------------------------
 
 /// Aggregate health classification for an agent or a cluster.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HealthStatus {
     /// All checks passing, latency within bounds.
@@ -28,6 +28,7 @@ pub enum HealthStatus {
     /// Multiple checks failing or agent unresponsive.
     Unhealthy,
     /// No health data available yet.
+    #[default]
     Unknown,
 }
 
@@ -52,12 +53,6 @@ impl std::fmt::Display for HealthStatus {
             Self::Unhealthy => write!(f, "unhealthy"),
             Self::Unknown => write!(f, "unknown"),
         }
-    }
-}
-
-impl Default for HealthStatus {
-    fn default() -> Self {
-        Self::Unknown
     }
 }
 
@@ -420,8 +415,14 @@ mod tests {
     fn health_status_from_failures() {
         assert_eq!(HealthStatus::from_failures(0, 3, 5), HealthStatus::Healthy);
         assert_eq!(HealthStatus::from_failures(3, 3, 5), HealthStatus::Degraded);
-        assert_eq!(HealthStatus::from_failures(5, 3, 5), HealthStatus::Unhealthy);
-        assert_eq!(HealthStatus::from_failures(10, 3, 5), HealthStatus::Unhealthy);
+        assert_eq!(
+            HealthStatus::from_failures(5, 3, 5),
+            HealthStatus::Unhealthy
+        );
+        assert_eq!(
+            HealthStatus::from_failures(10, 3, 5),
+            HealthStatus::Unhealthy
+        );
     }
 
     #[test]

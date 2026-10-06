@@ -46,7 +46,7 @@ use tracing::{debug, info, warn};
 use crate::config::SdkConfig;
 use crate::handler::HandlerRegistry;
 use crate::middleware::Middleware;
-use crate::task_types::{Event, SdkTaskSpec, SdkTaskResult};
+use crate::task_types::{Event, SdkTaskResult, SdkTaskSpec};
 
 // ---------------------------------------------------------------------------
 // InstanceState
@@ -173,6 +173,7 @@ pub struct AgentInstance {
     created_at: DateTime<Utc>,
     /// Shutdown notification channel.
     shutdown_notify: Arc<Notify>,
+    task_slots: tokio::sync::Semaphore,
 }
 
 impl AgentInstance {
@@ -185,7 +186,9 @@ impl AgentInstance {
         middleware: Vec<Arc<dyn Middleware>>,
         heartbeat: Duration,
     ) -> Self {
+        let task_slots = tokio::sync::Semaphore::new(config.max_concurrent_tasks as usize);
         Self {
+            task_slots,
             manifest,
             context,
             config,
@@ -431,12 +434,18 @@ impl AgentInstance {
             .cloned()
             .unwrap_or_else(|| msg.kind.to_string());
 
-        let handler = self
-            .handler_registry
-            .find_message_handler(&routing_key);
+        let handler = self.handler_registry.find_message_handler(&routing_key);
 
         let result = match handler {
-            Some(h) => h.handle_message(msg, &self.context).await,
+            Some(mut h) => {
+                for middleware in &self.middleware {
+                    h = Arc::new(crate::middleware::MiddlewareAdapter {
+                        middleware: middleware.clone(),
+                        next: h,
+                    });
+                }
+                h.handle_message(msg, &self.context).await
+            }
             None => {
                 debug!(
                     routing_key = %routing_key,
@@ -466,24 +475,43 @@ impl AgentInstance {
             ));
         }
 
+        let _task_slot =
+            self.task_slots
+                .try_acquire()
+                .map_err(|_| DafError::ResourceExhausted {
+                    resource: "SDK task slots".into(),
+                })?;
         let capability = task
             .required_capabilities
             .first()
             .map(|s| s.as_str())
             .unwrap_or(&task.name);
 
-        let handler = self
-            .handler_registry
-            .find_task_handler(capability);
+        let handler = self.handler_registry.find_task_handler(capability);
 
         let result = match handler {
-            Some(h) => h.handle_task(task, &self.context).await,
-            None => {
-                Err(DafError::NotFound {
-                    entity: "task_handler".into(),
-                    id: capability.to_string(),
-                })
+            Some(h) => {
+                let timeout = task.timeout;
+                if timeout.is_zero() {
+                    Err(DafError::TimeoutError {
+                        operation: "SDK task".into(),
+                        duration: timeout,
+                    })
+                } else {
+                    tokio::time::timeout(timeout, h.handle_task(task, &self.context))
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(DafError::TimeoutError {
+                                operation: "SDK task".into(),
+                                duration: timeout,
+                            })
+                        })
+                }
             }
+            None => Err(DafError::NotFound {
+                entity: "task_handler".into(),
+                id: capability.to_string(),
+            }),
         };
 
         {
@@ -499,9 +527,7 @@ impl AgentInstance {
 
     /// Dispatch an event to all matching event handlers.
     pub async fn dispatch_event(&self, event: Event) -> DafResult<()> {
-        let handlers = self
-            .handler_registry
-            .find_event_handlers(&event.event_type);
+        let handlers = self.handler_registry.find_event_handlers(&event.event_type);
 
         for handler in handlers {
             if let Err(e) = handler.handle_event(event.clone(), &self.context).await {
@@ -582,6 +608,111 @@ mod tests {
             .kind(AgentKind::Worker)
             .build()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn configured_task_admission_limit_releases_on_caller_drop() {
+        struct Hanging;
+        #[async_trait::async_trait]
+        impl crate::handler::TaskHandler for Hanging {
+            async fn handle_task(
+                &self,
+                _: SdkTaskSpec,
+                _: &AgentContext,
+            ) -> DafResult<SdkTaskResult> {
+                std::future::pending().await
+            }
+        }
+        let mut config = SdkConfig::test();
+        config.max_concurrent_tasks = 1;
+        let inst = AgentBuilder::new("one-slot")
+            .with_config(config)
+            .on_task("hang", Hanging)
+            .build()
+            .unwrap();
+        inst.start().await.unwrap();
+        {
+            let work = inst.process_task(SdkTaskSpec::new("hang", "first"));
+            tokio::pin!(work);
+            tokio::select! {
+                _ = &mut work => panic!("must hang"),
+                _ = tokio::time::sleep(Duration::from_millis(5)) => {}
+            }
+            assert!(matches!(
+                inst.process_task(SdkTaskSpec::new("hang", "second")).await,
+                Err(DafError::ResourceExhausted { .. })
+            ));
+        }
+        let result = inst
+            .process_task(SdkTaskSpec::new("hang", "third").with_timeout(Duration::ZERO))
+            .await;
+        assert!(matches!(result, Err(DafError::TimeoutError { .. })));
+    }
+
+    #[tokio::test]
+    async fn configured_auth_middleware_rejects_before_handler() {
+        struct Handler;
+        #[async_trait::async_trait]
+        impl crate::handler::MessageHandler for Handler {
+            async fn handle_message(
+                &self,
+                msg: Message,
+                _: &AgentContext,
+            ) -> DafResult<Option<Message>> {
+                Ok(Some(msg))
+            }
+        }
+        let inst = AgentBuilder::new("authenticated")
+            .on_message("*", Handler)
+            .with_middleware(crate::middleware::AuthMiddleware::new(
+                "authorization",
+                vec!["allowed".into()],
+            ))
+            .build()
+            .unwrap();
+        inst.start().await.unwrap();
+        let denied =
+            Message::builder(daf_core::message::MessageKind::Request, AgentId::new()).build();
+        assert!(matches!(
+            inst.process_message(denied).await,
+            Err(DafError::Unauthorized { .. })
+        ));
+        let allowed = Message::builder(daf_core::message::MessageKind::Request, AgentId::new())
+            .header("authorization", "allowed")
+            .build();
+        assert!(inst.process_message(allowed).await.unwrap().is_some());
+        assert_eq!(inst.stats().messages_failed, 1);
+    }
+
+    #[tokio::test]
+    async fn sdk_task_timeout_drops_handler() {
+        struct Hanging;
+        #[async_trait::async_trait]
+        impl crate::handler::TaskHandler for Hanging {
+            async fn handle_task(
+                &self,
+                _: SdkTaskSpec,
+                _: &AgentContext,
+            ) -> DafResult<SdkTaskResult> {
+                std::future::pending().await
+            }
+        }
+        let inst = AgentBuilder::new("deadline")
+            .on_task("hang", Hanging)
+            .build()
+            .unwrap();
+        inst.start().await.unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            inst.process_task(
+                SdkTaskSpec::new("hang", "deadline regression")
+                    .with_timeout(Duration::from_millis(5)),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(DafError::TimeoutError { .. })));
+        assert_eq!(inst.stats().tasks_failed, 1);
     }
 
     #[test]

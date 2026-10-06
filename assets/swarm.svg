@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1056 248" role="img" aria-labelledby="title desc">
+<title id="title">DAF specialist execution</title><desc id="desc">Review a plan, validate every assignment, run registered handlers, then inspect evidence.</desc>
+<rect width="1056" height="248" rx="20" fill="#0b1220"/>
+<g font-family="system-ui,sans-serif" fill="#e6edf7"><text x="32" y="45" font-size="22" font-weight="700">A team with explicit work and verifiable outcomes</text><text x="32" y="75" font-size="14" fill="#a7b4c9">Darshankumar Joshi · DAF / DDAL / DJcode</text></g>
+<g fill="#17243a" stroke="#6e94ff" stroke-width="1.5"><rect x="32" y="104" width="218" height="96" rx="12"/><rect x="290" y="104" width="218" height="96" rx="12"/><rect x="548" y="104" width="218" height="96" rx="12"/><rect x="806" y="104" width="218" height="96" rx="12"/></g>
+<g font-family="system-ui,sans-serif" font-size="17" fill="#e6edf7" font-weight="600"><text x="51" y="138">Review plan</text><text x="309" y="138">Validate admission</text><text x="567" y="138">Execute handlers</text><text x="825" y="138">Inspect evidence</text></g>
+<g font-family="system-ui,sans-serif" font-size="13" fill="#b4c3db"><text x="51" y="166">Named work + dependencies</text><text x="309" y="166">Capabilities + resource limits</text><text x="567" y="166">Deadlines + success gates</text><text x="825" y="166">Results + meaningful tests</text></g>
+<g fill="#86a6ff" font-size="28" font-family="system-ui,sans-serif"><text x="259" y="160">→</text><text x="517" y="160">→</text><text x="775" y="160">→</text></g></svg>

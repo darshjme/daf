@@ -114,9 +114,7 @@ pub fn validate_manifest(manifest: &ManifestFile) -> Result<(), Vec<ValidationEr
             errors.push(ValidationError::DuplicateCapability(cap.name.clone()));
         }
         if cap.name.is_empty() {
-            errors.push(ValidationError::MissingField(
-                "capabilities[].name".into(),
-            ));
+            errors.push(ValidationError::MissingField("capabilities[].name".into()));
         }
     }
 
@@ -508,7 +506,11 @@ mod tests {
             description: None,
         };
         let errors = validate_manifest(&file).unwrap_err();
-        assert!(errors.iter().any(|e| matches!(e, ValidationError::MissingField(_))));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingField(_)))
+        );
     }
 
     #[test]
@@ -522,7 +524,11 @@ mod tests {
             description: None,
         };
         let errors = validate_manifest(&file).unwrap_err();
-        assert!(errors.iter().any(|e| matches!(e, ValidationError::InvalidField { .. })));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::InvalidField { .. }))
+        );
     }
 
     #[test]
@@ -547,7 +553,11 @@ mod tests {
             description: None,
         };
         let errors = validate_manifest(&file).unwrap_err();
-        assert!(errors.iter().any(|e| matches!(e, ValidationError::DuplicateCapability(_))));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::DuplicateCapability(_)))
+        );
     }
 
     #[test]
@@ -560,7 +570,10 @@ mod tests {
         assert_eq!(manifest.kind, AgentKind::Worker);
         assert!(manifest.has_capability("lint"));
         assert_eq!(manifest.metadata.get("team").unwrap(), "platform");
-        assert_eq!(manifest.metadata.get("description").unwrap(), "A test agent");
+        assert_eq!(
+            manifest.metadata.get("description").unwrap(),
+            "A test agent"
+        );
     }
 
     #[tokio::test]
@@ -631,15 +644,21 @@ mod tests {
         std::fs::write(&path, "v1").unwrap();
 
         let mut detector = ChangeDetector::new();
-        detector.detect_changes(&[path.clone()]).unwrap();
+        detector
+            .detect_changes(std::slice::from_ref(&path))
+            .unwrap();
 
         // No changes on second scan.
-        let changes = detector.detect_changes(&[path.clone()]).unwrap();
+        let changes = detector
+            .detect_changes(std::slice::from_ref(&path))
+            .unwrap();
         assert!(changes.is_empty());
 
         // Modify the file.
         std::fs::write(&path, "v2").unwrap();
-        let changes = detector.detect_changes(&[path.clone()]).unwrap();
+        let changes = detector
+            .detect_changes(std::slice::from_ref(&path))
+            .unwrap();
         assert_eq!(changes.len(), 1);
         assert!(matches!(changes[0], ManifestChange::Modified(_)));
     }
@@ -651,7 +670,9 @@ mod tests {
         std::fs::write(&path, "{}").unwrap();
 
         let mut detector = ChangeDetector::new();
-        detector.detect_changes(&[path.clone()]).unwrap();
+        detector
+            .detect_changes(std::slice::from_ref(&path))
+            .unwrap();
 
         // File "removed" (not in the list anymore).
         let changes = detector.detect_changes(&[]).unwrap();

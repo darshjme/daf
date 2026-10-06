@@ -54,8 +54,8 @@ pub use episode::{Episode, EpisodeEvent, EpisodeEventType, EpisodeRecorder};
 pub use error::LoggerError;
 pub use extractor::{ExtractionRule, KBExtractor, KnowledgeCategory, KnowledgeEntry};
 pub use query::{
-    count_by_agent, count_by_level, conversation_duration_stats, DurationStats, LogQuery,
-    QueryResult,
+    DurationStats, LogQuery, QueryResult, conversation_duration_stats, count_by_agent,
+    count_by_level,
 };
 pub use retention::{RetentionManager, RetentionPolicy, RetentionStats};
 pub use sink::{BufferedSink, CollectorSink, FanOutSink, FilterSink, LogSink, TransformSink};

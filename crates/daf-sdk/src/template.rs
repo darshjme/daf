@@ -1,7 +1,7 @@
 //! Pre-configured agent templates for common patterns.
 //!
 //! Templates accelerate development by providing ready-made
-//! [`AgentBuilder`](crate::builder::AgentBuilder) configurations for the
+//! [`AgentBuilder`] configurations for the
 //! most frequent agent archetypes. Each template sets sensible defaults
 //! for kind, capabilities, middleware, and resource limits.
 //!
@@ -73,21 +73,13 @@ impl WorkerTemplate {
     }
 
     /// Register a task handler for a capability.
-    pub fn on_task(
-        mut self,
-        capability: impl Into<String>,
-        handler: impl TaskHandler,
-    ) -> Self {
+    pub fn on_task(mut self, capability: impl Into<String>, handler: impl TaskHandler) -> Self {
         self.builder = self.builder.on_task(capability, handler);
         self
     }
 
     /// Register a message handler.
-    pub fn on_message(
-        mut self,
-        pattern: impl Into<String>,
-        handler: impl MessageHandler,
-    ) -> Self {
+    pub fn on_message(mut self, pattern: impl Into<String>, handler: impl MessageHandler) -> Self {
         self.builder = self.builder.on_message(pattern, handler);
         self
     }
@@ -144,11 +136,7 @@ impl RouterTemplate {
 
     /// Register a message route. Messages matching `pattern` will be
     /// dispatched to `handler`.
-    pub fn route(
-        mut self,
-        pattern: impl Into<String>,
-        handler: impl MessageHandler,
-    ) -> Self {
+    pub fn route(mut self, pattern: impl Into<String>, handler: impl MessageHandler) -> Self {
         self.builder = self.builder.on_message(pattern, handler);
         self
     }
@@ -219,11 +207,7 @@ impl PipelineTemplate {
     }
 
     /// Add a pipeline stage as a message handler.
-    pub fn stage(
-        mut self,
-        name: impl Into<String>,
-        handler: impl MessageHandler,
-    ) -> Self {
+    pub fn stage(mut self, name: impl Into<String>, handler: impl MessageHandler) -> Self {
         self.builder = self.builder.on_message(name, handler);
         self
     }
@@ -240,11 +224,7 @@ impl PipelineTemplate {
     }
 
     /// Register a task handler.
-    pub fn on_task(
-        mut self,
-        capability: impl Into<String>,
-        handler: impl TaskHandler,
-    ) -> Self {
+    pub fn on_task(mut self, capability: impl Into<String>, handler: impl TaskHandler) -> Self {
         self.builder = self.builder.on_task(capability, handler);
         self
     }
@@ -282,7 +262,7 @@ impl MonitorTemplate {
     pub fn new(name: impl Into<String>) -> Self {
         let limits = ResourceLimits {
             max_memory_bytes: Some(128 * 1024 * 1024), // 128 MiB
-            max_cpu_ms: Some(60_000),                   // 1 minute
+            max_cpu_ms: Some(60_000),                  // 1 minute
             max_connections: Some(16),
             max_message_queue: Some(256),
         };
@@ -297,21 +277,13 @@ impl MonitorTemplate {
     }
 
     /// Register an event handler for the given event pattern.
-    pub fn on_event(
-        mut self,
-        pattern: impl Into<String>,
-        handler: impl EventHandler,
-    ) -> Self {
+    pub fn on_event(mut self, pattern: impl Into<String>, handler: impl EventHandler) -> Self {
         self.builder = self.builder.on_event(pattern, handler);
         self
     }
 
     /// Register a message handler (e.g. for control messages).
-    pub fn on_message(
-        mut self,
-        pattern: impl Into<String>,
-        handler: impl MessageHandler,
-    ) -> Self {
+    pub fn on_message(mut self, pattern: impl Into<String>, handler: impl MessageHandler) -> Self {
         self.builder = self.builder.on_message(pattern, handler);
         self
     }

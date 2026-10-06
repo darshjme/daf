@@ -89,9 +89,7 @@ impl FilterSink {
                 return false;
             }
         }
-        if !self.allowed_agents.is_empty()
-            && !self.allowed_agents.contains(&entry.source_agent)
-        {
+        if !self.allowed_agents.is_empty() && !self.allowed_agents.contains(&entry.source_agent) {
             return false;
         }
         if !self.required_tags.is_empty()
@@ -247,7 +245,10 @@ impl LogSink for FanOutSink {
         // Collect errors but don't fail the whole pipeline for one bad sink.
         let errors: Vec<_> = results.into_iter().filter_map(|r| r.err()).collect();
         if !errors.is_empty() {
-            tracing::warn!(count = errors.len(), "FanOutSink: some downstream sinks failed");
+            tracing::warn!(
+                count = errors.len(),
+                "FanOutSink: some downstream sinks failed"
+            );
             // Return the first error.
             return Err(errors.into_iter().next().unwrap());
         }
@@ -398,12 +399,21 @@ mod tests {
     #[tokio::test]
     async fn filter_sink_by_level() {
         let collector = Arc::new(CollectorSink::new());
-        let filter = FilterSink::new(collector.clone() as Arc<dyn LogSink>)
-            .with_min_level(LogLevel::Warn);
+        let filter =
+            FilterSink::new(collector.clone() as Arc<dyn LogSink>).with_min_level(LogLevel::Warn);
 
-        filter.process(&make_entry("debug msg", LogLevel::Debug)).await.unwrap();
-        filter.process(&make_entry("warn msg", LogLevel::Warn)).await.unwrap();
-        filter.process(&make_entry("error msg", LogLevel::Error)).await.unwrap();
+        filter
+            .process(&make_entry("debug msg", LogLevel::Debug))
+            .await
+            .unwrap();
+        filter
+            .process(&make_entry("warn msg", LogLevel::Warn))
+            .await
+            .unwrap();
+        filter
+            .process(&make_entry("error msg", LogLevel::Error))
+            .await
+            .unwrap();
 
         assert_eq!(collector.len(), 2);
     }
@@ -423,7 +433,10 @@ mod tests {
         assert_eq!(entries.len(), 2);
 
         // Clean entry should pass through unchanged.
-        assert_eq!(entries[0].content, serde_json::Value::String("hello world".into()));
+        assert_eq!(
+            entries[0].content,
+            serde_json::Value::String("hello world".into())
+        );
 
         // Sensitive entry should be redacted.
         let redacted = entries[1].content.as_str().unwrap();
@@ -457,12 +470,21 @@ mod tests {
         let buffered = BufferedSink::new(3, collector.clone() as Arc<dyn LogSink>);
 
         // Two entries — should still be buffered.
-        buffered.process(&make_entry("one", LogLevel::Info)).await.unwrap();
-        buffered.process(&make_entry("two", LogLevel::Info)).await.unwrap();
+        buffered
+            .process(&make_entry("one", LogLevel::Info))
+            .await
+            .unwrap();
+        buffered
+            .process(&make_entry("two", LogLevel::Info))
+            .await
+            .unwrap();
         assert_eq!(collector.len(), 0);
 
         // Third entry triggers flush.
-        buffered.process(&make_entry("three", LogLevel::Info)).await.unwrap();
+        buffered
+            .process(&make_entry("three", LogLevel::Info))
+            .await
+            .unwrap();
         assert_eq!(collector.len(), 3);
     }
 
@@ -471,7 +493,10 @@ mod tests {
         let collector = Arc::new(CollectorSink::new());
         let buffered = BufferedSink::new(100, collector.clone() as Arc<dyn LogSink>);
 
-        buffered.process(&make_entry("one", LogLevel::Info)).await.unwrap();
+        buffered
+            .process(&make_entry("one", LogLevel::Info))
+            .await
+            .unwrap();
         assert_eq!(collector.len(), 0);
 
         buffered.flush().await.unwrap();
@@ -483,10 +508,9 @@ mod tests {
         // Build: filter(warn+) → redact → collect
         let collector = Arc::new(CollectorSink::new());
         let redactor = Arc::new(TransformSink::redact_secrets(
-            collector.clone() as Arc<dyn LogSink>,
+            collector.clone() as Arc<dyn LogSink>
         ));
-        let filter = FilterSink::new(redactor as Arc<dyn LogSink>)
-            .with_min_level(LogLevel::Warn);
+        let filter = FilterSink::new(redactor as Arc<dyn LogSink>).with_min_level(LogLevel::Warn);
 
         // Debug-level entry with secret — should be filtered out.
         filter
@@ -530,7 +554,10 @@ mod tests {
             collector.clone() as Arc<dyn LogSink>,
         );
 
-        enricher.process(&make_entry("test", LogLevel::Info)).await.unwrap();
+        enricher
+            .process(&make_entry("test", LogLevel::Info))
+            .await
+            .unwrap();
 
         let entries = collector.entries();
         assert_eq!(entries[0].metadata["env"], "prod");

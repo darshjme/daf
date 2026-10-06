@@ -147,12 +147,13 @@ impl ResourcePool {
     /// the full amount is reserved or nothing is.
     pub fn acquire(&self, kind: &ResourceKind, amount: u64) -> DafResult<()> {
         let mut inner = self.inner.lock();
-        let limit = inner.limits.get_mut(kind).ok_or_else(|| {
-            DafError::NotFound {
+        let limit = inner
+            .limits
+            .get_mut(kind)
+            .ok_or_else(|| DafError::NotFound {
                 entity: "resource_limit".into(),
                 id: kind.to_string(),
-            }
-        })?;
+            })?;
 
         if limit.available() < amount {
             return Err(DafError::ResourceExhausted {
@@ -186,11 +187,7 @@ impl ResourcePool {
 
     /// Acquire `amount` units and return an RAII guard that releases them
     /// automatically when dropped.
-    pub fn acquire_guard(
-        &self,
-        kind: ResourceKind,
-        amount: u64,
-    ) -> DafResult<ResourceGuard> {
+    pub fn acquire_guard(&self, kind: ResourceKind, amount: u64) -> DafResult<ResourceGuard> {
         self.acquire(&kind, amount)?;
         Ok(ResourceGuard {
             pool: self.clone(),
@@ -351,16 +348,10 @@ mod tests {
 
         {
             let _guard = pool.acquire_guard(ResourceKind::Network, 5).unwrap();
-            assert_eq!(
-                pool.usage(&ResourceKind::Network).unwrap().current_usage,
-                5
-            );
+            assert_eq!(pool.usage(&ResourceKind::Network).unwrap().current_usage, 5);
         }
         // Guard dropped, should be released.
-        assert_eq!(
-            pool.usage(&ResourceKind::Network).unwrap().current_usage,
-            0
-        );
+        assert_eq!(pool.usage(&ResourceKind::Network).unwrap().current_usage, 0);
     }
 
     #[test]
@@ -373,10 +364,7 @@ mod tests {
         assert_eq!(*guard.kind(), ResourceKind::Memory);
 
         guard.release();
-        assert_eq!(
-            pool.usage(&ResourceKind::Memory).unwrap().current_usage,
-            0
-        );
+        assert_eq!(pool.usage(&ResourceKind::Memory).unwrap().current_usage, 0);
     }
 
     #[test]
@@ -385,10 +373,7 @@ mod tests {
         pool.add_limit(ResourceLimit::new(ResourceKind::Memory, 100));
         pool.acquire(&ResourceKind::Memory, 80).unwrap();
         pool.reset();
-        assert_eq!(
-            pool.usage(&ResourceKind::Memory).unwrap().current_usage,
-            0
-        );
+        assert_eq!(pool.usage(&ResourceKind::Memory).unwrap().current_usage, 0);
     }
 
     #[test]

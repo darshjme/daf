@@ -4,8 +4,8 @@
 //! limits, idle timeout, max lifetime, periodic health checking, and
 //! round-robin selection.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;

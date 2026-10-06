@@ -4,8 +4,8 @@
 //! for lock-free, concurrent updates. Metrics can be snapshotted as a
 //! [`MetricsSnapshot`] and exported as JSON for monitoring systems.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -99,9 +99,7 @@ impl RuntimeMetrics {
 
     /// Record that an agent was terminated.
     pub fn agent_terminated(&self) {
-        self.inner
-            .agents_active
-            .fetch_sub(1, Ordering::Relaxed);
+        self.inner.agents_active.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// Record that a task completed (success or failure).

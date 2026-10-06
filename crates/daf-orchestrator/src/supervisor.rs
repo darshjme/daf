@@ -299,7 +299,7 @@ impl Supervisor {
         while self
             .restart_history
             .front()
-            .map_or(false, |r| r.timestamp < window_start)
+            .is_some_and(|r| r.timestamp < window_start)
         {
             self.restart_history.pop_front();
         }
@@ -449,8 +449,8 @@ mod tests {
         let b = AgentId::new();
         let c = AgentId::new();
 
-        let mut sup = Supervisor::new(SupervisorStrategy::OneForOne)
-            .with_policy(RestartPolicy::default());
+        let mut sup =
+            Supervisor::new(SupervisorStrategy::OneForOne).with_policy(RestartPolicy::default());
         sup.add_agent(a);
         sup.add_agent(b);
         sup.add_agent(c);
@@ -475,8 +475,8 @@ mod tests {
         let b = AgentId::new();
         let c = AgentId::new();
 
-        let mut sup = Supervisor::new(SupervisorStrategy::AllForOne)
-            .with_policy(RestartPolicy::default());
+        let mut sup =
+            Supervisor::new(SupervisorStrategy::AllForOne).with_policy(RestartPolicy::default());
         sup.add_agent(a);
         sup.add_agent(b);
         sup.add_agent(c);
@@ -504,8 +504,8 @@ mod tests {
         let b = AgentId::new();
         let c = AgentId::new();
 
-        let mut sup = Supervisor::new(SupervisorStrategy::RestForOne)
-            .with_policy(RestartPolicy::default());
+        let mut sup =
+            Supervisor::new(SupervisorStrategy::RestForOne).with_policy(RestartPolicy::default());
         sup.add_agent(a);
         sup.add_agent(b);
         sup.add_agent(c);
@@ -548,9 +548,11 @@ mod tests {
 
         // Third failure -> budget exceeded, dead letter.
         let events3 = sup.handle_failure(a, "fail-3").unwrap();
-        assert!(events3
-            .iter()
-            .any(|e| matches!(e, SupervisorEvent::RestartLimitExceeded { .. })));
+        assert!(
+            events3
+                .iter()
+                .any(|e| matches!(e, SupervisorEvent::RestartLimitExceeded { .. }))
+        );
         assert_eq!(sup.dead_letters().len(), 1);
         assert!(!sup.agents().contains(&a));
     }
@@ -563,9 +565,11 @@ mod tests {
         sup.add_agent(a);
 
         let events = sup.handle_failure(a, "instant-death").unwrap();
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, SupervisorEvent::RestartLimitExceeded { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, SupervisorEvent::RestartLimitExceeded { .. }))
+        );
     }
 
     #[test]
@@ -615,8 +619,8 @@ mod tests {
     #[test]
     fn event_log_and_clear() {
         let a = AgentId::new();
-        let mut sup = Supervisor::new(SupervisorStrategy::OneForOne)
-            .with_policy(RestartPolicy::default());
+        let mut sup =
+            Supervisor::new(SupervisorStrategy::OneForOne).with_policy(RestartPolicy::default());
         sup.add_agent(a);
 
         sup.handle_failure(a, "test").unwrap();
@@ -628,12 +632,11 @@ mod tests {
 
     #[test]
     fn has_restart_budget() {
-        let mut sup = Supervisor::new(SupervisorStrategy::OneForOne)
-            .with_policy(RestartPolicy {
-                max_restarts: 1,
-                time_window: Duration::from_secs(60),
-                restart_delay: Duration::ZERO,
-            });
+        let mut sup = Supervisor::new(SupervisorStrategy::OneForOne).with_policy(RestartPolicy {
+            max_restarts: 1,
+            time_window: Duration::from_secs(60),
+            restart_delay: Duration::ZERO,
+        });
         let a = AgentId::new();
         sup.add_agent(a);
 

@@ -9,11 +9,11 @@
 //!
 //! | Module | Purpose |
 //! |--------|---------|
-//! | [`agent`] | Agent identity, lifecycle, capabilities, and the [`Agent`](agent::Agent) trait |
+//! | [`agent`] | Agent identity, lifecycle, capabilities, and the [`Agent`] trait |
 //! | [`message`] | Inter-agent message types, builder, and envelope routing |
 //! | [`task`] | Task specifications, state machine, results, and handles |
 //! | [`resource`] | Resource budgets, pools, and RAII guards |
-//! | [`error`] | Unified error types and the [`DafResult`](error::DafResult) alias |
+//! | [`error`] | Unified error types and the [`DafResult`] alias |
 //! | [`config`] | Runtime configuration structs with serde support |
 //! | [`identity`] | Cryptographic identity: Ed25519 keys, blake3 node IDs, signed payloads |
 //! | [`event`] | Event bus with publish/subscribe and filtering |
@@ -24,10 +24,10 @@
 //!    for reference-counted, zero-copy slicing.
 //! 2. **Time-ordered identifiers** — all IDs use UUID v7 so they sort
 //!    chronologically without an external sequence generator.
-//! 3. **Typed errors** — [`DafError`](error::DafError) covers every failure
+//! 3. **Typed errors** — [`DafError`] covers every failure
 //!    mode with enough context for actionable diagnostics.
-//! 4. **Trait-based extension** — the [`Agent`](agent::Agent) and
-//!    [`EventBus`](event::EventBus) traits allow plugging in custom
+//! 4. **Trait-based extension** — the [`Agent`] and
+//!    [`EventBus`] traits allow plugging in custom
 //!    implementations without touching core code.
 //! 5. **Serde everywhere** — every public struct derives `Serialize` and
 //!    `Deserialize` for config files, wire protocols, and persistence.

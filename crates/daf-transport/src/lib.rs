@@ -18,7 +18,7 @@
 //!
 //! ## Connection pooling
 //!
-//! The [`pool`] module provides a generic [`ConnectionPool`](pool::ConnectionPool)
+//! The [`pool`] module provides a generic [`ConnectionPool`]
 //! with configurable limits, idle eviction, max lifetime, periodic health
 //! checks, and round-robin selection.
 //!

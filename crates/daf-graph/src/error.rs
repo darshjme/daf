@@ -6,6 +6,13 @@ use thiserror::Error;
 /// Errors produced by the graph engine.
 #[derive(Debug, Error)]
 pub enum GraphError {
+    /// Executor configuration cannot make progress.
+    #[error("invalid executor configuration: {0}")]
+    InvalidConfiguration(String),
+    /// Output predicates require an output-aware handler, which is not supported yet.
+    #[error("output edge predicates are unsupported by this executor")]
+    UnsupportedOutputCondition,
+
     /// A node was referenced that does not exist in the graph.
     #[error("node not found: {0}")]
     NodeNotFound(NodeId),

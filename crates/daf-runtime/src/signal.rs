@@ -1,6 +1,6 @@
 //! Signal handling for graceful shutdown and configuration reload.
 //!
-//! The [`ShutdownSignal`] wraps a [`tokio_util::sync::CancellationToken`]
+//! The [`ShutdownSignal`] shares atomic state and Tokio notifications
 //! and listens for OS signals (`SIGTERM`, `SIGINT`, `SIGHUP`) to coordinate
 //! a clean teardown of the runtime.
 
@@ -61,7 +61,11 @@ impl ShutdownSignal {
 
     /// Programmatically trigger shutdown.
     pub fn trigger(&self) {
-        if !self.inner.triggered.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        if !self
+            .inner
+            .triggered
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
             info!("shutdown signal triggered");
             self.inner.notify.notify_waiters();
         }
@@ -71,15 +75,20 @@ impl ShutdownSignal {
     ///
     /// Returns immediately if shutdown was already requested.
     pub async fn wait(&self) {
-        if self.is_triggered() {
-            return;
+        // Register before checking the flag: notify_waiters does not retain a permit.
+        let notified = self.inner.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !self.is_triggered() {
+            notified.await;
         }
-        self.inner.notify.notified().await;
     }
 
     /// Returns `true` if shutdown has been requested.
     pub fn is_triggered(&self) -> bool {
-        self.inner.triggered.load(std::sync::atomic::Ordering::SeqCst)
+        self.inner
+            .triggered
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Returns `true` if the graceful-shutdown timeout has expired and
@@ -90,7 +99,9 @@ impl ShutdownSignal {
 
     /// Mark the shutdown as forced (deadline exceeded).
     pub fn force(&self) {
-        self.inner.forced.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.inner
+            .forced
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         // Re-notify in case anyone is waiting.
         self.inner.notify.notify_waiters();
     }
@@ -119,7 +130,7 @@ impl ShutdownSignal {
     pub async fn listen_for_signals(&self) {
         #[cfg(unix)]
         {
-            use tokio::signal::unix::{signal, SignalKind};
+            use tokio::signal::unix::{SignalKind, signal};
 
             let mut sigterm =
                 signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
@@ -130,6 +141,7 @@ impl ShutdownSignal {
 
             loop {
                 tokio::select! {
+                    _ = self.wait() => { break; }
                     _ = sigterm.recv() => {
                         info!("received SIGTERM — initiating graceful shutdown");
                         self.trigger();
@@ -143,6 +155,7 @@ impl ShutdownSignal {
                         }
                         info!("received SIGINT — initiating graceful shutdown");
                         self.trigger();
+                        break;
                     }
                     _ = sighup.recv() => {
                         self.trigger_reload();
@@ -154,7 +167,10 @@ impl ShutdownSignal {
         #[cfg(not(unix))]
         {
             // On non-Unix platforms, only handle Ctrl+C.
-            let _ = tokio::signal::ctrl_c().await;
+            tokio::select! {
+                _ = self.wait() => return,
+                _ = tokio::signal::ctrl_c() => {},
+            }
             info!("received Ctrl+C — initiating graceful shutdown");
             self.trigger();
         }
@@ -195,6 +211,15 @@ impl std::fmt::Debug for ShutdownSignal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn programmatic_shutdown_releases_signal_listener() {
+        let signal = ShutdownSignal::new(Duration::from_secs(1));
+        signal.trigger();
+        tokio::time::timeout(Duration::from_secs(1), signal.listen_for_signals())
+            .await
+            .expect("programmatic shutdown must release listener");
+    }
 
     #[test]
     fn signal_starts_untriggered() {

@@ -38,10 +38,11 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Deployment environment, governs default values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Environment {
     /// Local development. Relaxed timeouts, verbose logging, in-memory stores.
+    #[default]
     Development,
     /// Automated test runs. Fast timeouts, in-memory stores, no network.
     Test,
@@ -49,12 +50,6 @@ pub enum Environment {
     Staging,
     /// Production. Strict timeouts, durable stores, TLS required.
     Production,
-}
-
-impl Default for Environment {
-    fn default() -> Self {
-        Self::Development
-    }
 }
 
 impl std::fmt::Display for Environment {
@@ -296,15 +291,15 @@ impl SdkConfig {
             config.registry_url = url;
         }
         if let Ok(secs) = std::env::var("DAF_HEARTBEAT_SECS") {
-            let s: u64 = secs.parse().map_err(|e| {
-                DafError::ConfigError(format!("invalid DAF_HEARTBEAT_SECS: {e}"))
-            })?;
+            let s: u64 = secs
+                .parse()
+                .map_err(|e| DafError::ConfigError(format!("invalid DAF_HEARTBEAT_SECS: {e}")))?;
             config.heartbeat_interval = Duration::from_secs(s);
         }
         if let Ok(max) = std::env::var("DAF_MAX_TASKS") {
-            let m: u32 = max.parse().map_err(|e| {
-                DafError::ConfigError(format!("invalid DAF_MAX_TASKS: {e}"))
-            })?;
+            let m: u32 = max
+                .parse()
+                .map_err(|e| DafError::ConfigError(format!("invalid DAF_MAX_TASKS: {e}")))?;
             config.max_concurrent_tasks = m;
         }
         if let Ok(level) = std::env::var("DAF_LOG_LEVEL") {
@@ -551,35 +546,32 @@ mod tests {
 
     #[test]
     fn builder_rejects_zero_tasks() {
-        let result = SdkConfig::builder()
-            .max_concurrent_tasks(0)
-            .build();
+        let result = SdkConfig::builder().max_concurrent_tasks(0).build();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("max_concurrent_tasks"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("max_concurrent_tasks")
+        );
     }
 
     #[test]
     fn builder_rejects_empty_registry() {
-        let result = SdkConfig::builder()
-            .registry_url("")
-            .build();
+        let result = SdkConfig::builder().registry_url("").build();
         assert!(result.is_err());
     }
 
     #[test]
     fn builder_rejects_unknown_memory_backend() {
-        let result = SdkConfig::builder()
-            .memory_backend("postgres")
-            .build();
+        let result = SdkConfig::builder().memory_backend("postgres").build();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("postgres"));
     }
 
     #[test]
     fn sled_backend_requires_data_dir() {
-        let result = SdkConfig::builder()
-            .memory_backend("sled")
-            .build();
+        let result = SdkConfig::builder().memory_backend("sled").build();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("data_dir"));
     }

@@ -93,9 +93,7 @@ impl TransportError {
     pub fn is_fatal(&self) -> bool {
         matches!(
             self,
-            Self::TlsError { .. }
-                | Self::InvalidAddress { .. }
-                | Self::ConnectionClosed
+            Self::TlsError { .. } | Self::InvalidAddress { .. } | Self::ConnectionClosed
         )
     }
 }
@@ -116,38 +114,48 @@ mod tests {
 
     #[test]
     fn retryable_classification() {
-        assert!(TransportError::ConnectionRefused {
-            address: "127.0.0.1:8080".into()
-        }
-        .is_retryable());
+        assert!(
+            TransportError::ConnectionRefused {
+                address: "127.0.0.1:8080".into()
+            }
+            .is_retryable()
+        );
 
-        assert!(TransportError::Timeout {
-            operation: "connect".into(),
-            duration: std::time::Duration::from_secs(5),
-        }
-        .is_retryable());
+        assert!(
+            TransportError::Timeout {
+                operation: "connect".into(),
+                duration: std::time::Duration::from_secs(5),
+            }
+            .is_retryable()
+        );
 
-        assert!(!TransportError::TlsError {
-            message: "bad cert".into()
-        }
-        .is_retryable());
+        assert!(
+            !TransportError::TlsError {
+                message: "bad cert".into()
+            }
+            .is_retryable()
+        );
 
         assert!(!TransportError::ConnectionClosed.is_retryable());
     }
 
     #[test]
     fn fatal_classification() {
-        assert!(TransportError::TlsError {
-            message: "expired".into()
-        }
-        .is_fatal());
+        assert!(
+            TransportError::TlsError {
+                message: "expired".into()
+            }
+            .is_fatal()
+        );
 
         assert!(TransportError::ConnectionClosed.is_fatal());
 
-        assert!(!TransportError::ConnectionRefused {
-            address: "localhost".into()
-        }
-        .is_fatal());
+        assert!(
+            !TransportError::ConnectionRefused {
+                address: "localhost".into()
+            }
+            .is_fatal()
+        );
     }
 
     #[test]
@@ -168,7 +176,13 @@ mod tests {
             address: "10.0.0.1:443".into(),
         };
         let derr: daf_core::error::DafError = terr.into();
-        assert!(matches!(derr, daf_core::error::DafError::TransportError { retryable: true, .. }));
+        assert!(matches!(
+            derr,
+            daf_core::error::DafError::TransportError {
+                retryable: true,
+                ..
+            }
+        ));
     }
 
     #[test]

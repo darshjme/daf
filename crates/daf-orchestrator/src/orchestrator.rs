@@ -6,8 +6,8 @@
 //! monitors progress, and drives graceful shutdown.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -52,6 +52,7 @@ struct MissionLease<'a> {
 }
 impl Drop for MissionLease<'_> {
     fn drop(&mut self) {
+        self.orchestrator.active_missions.lock().remove(&self.id);
         if !self.finished {
             self.orchestrator
                 .missions
@@ -141,6 +142,7 @@ pub struct Orchestrator {
     agents: DashMap<AgentId, AgentEntry>,
     /// Active missions keyed by their ID.
     missions: DashMap<MissionId, MissionState>,
+    active_missions: parking_lot::Mutex<std::collections::HashSet<MissionId>>,
     /// Specialist routing engine.
     router: SpecialistRouter,
     /// Agent supervisor for restart policies. Behind a mutex because
@@ -167,6 +169,7 @@ impl Orchestrator {
             workers: DashMap::new(),
             agents: DashMap::new(),
             missions: DashMap::new(),
+            active_missions: parking_lot::Mutex::new(std::collections::HashSet::new()),
             router: SpecialistRouter::new(),
             supervisor: parking_lot::Mutex::new(Supervisor::new(SupervisorStrategy::OneForOne)),
             handoff_manager: HandoffManager::new(),
@@ -251,13 +254,28 @@ impl Orchestrator {
         task: &TaskSpec,
         required_capabilities: &[String],
     ) -> DafResult<AgentId> {
+        self.dispatch_executable_task(task, required_capabilities, false)
+    }
+
+    fn dispatch_executable_task(
+        &self,
+        task: &TaskSpec,
+        required_capabilities: &[String],
+        require_worker: bool,
+    ) -> DafResult<AgentId> {
         if self.is_shutting_down() {
             return Err(DafError::Internal(
                 "orchestrator is shutting down, cannot dispatch".into(),
             ));
         }
 
-        let decision = self.router.route_task(task, required_capabilities, None)?;
+        let decision = if require_worker {
+            let allowed = self.workers.iter().map(|worker| *worker.key()).collect();
+            self.router
+                .route_task_for_agents(task, required_capabilities, &allowed)?
+        } else {
+            self.router.route_task(task, required_capabilities, None)?
+        };
 
         // Update the agent's active task count.
         if let Some(mut entry) = self.agents.get_mut(&decision.agent_id) {
@@ -331,6 +349,21 @@ impl Orchestrator {
     pub async fn run_mission_async(&self, mission: &Mission) -> DafResult<MissionResult> {
         // Validate before inserting state, so invalid graphs cannot leak Planning.
         let waves = mission.resolve_execution_order()?;
+        {
+            let mut active = self.active_missions.lock();
+            if self.is_shutting_down() {
+                return Err(DafError::Internal("orchestrator is shutting down".into()));
+            }
+            if active.contains(&mission.id) {
+                return Err(DafError::ConfigError("mission is already executing".into()));
+            }
+            if active.len() >= self.config.max_concurrent_missions {
+                return Err(DafError::ResourceExhausted {
+                    resource: "mission slots".into(),
+                });
+            }
+            active.insert(mission.id);
+        }
         let started_at = Utc::now();
         let start = tokio::time::Instant::now();
         let mission_deadline = mission.timeout.map(|d| start + d);
@@ -398,7 +431,11 @@ impl Orchestrator {
                             }
                             retries_used += 1;
                         }
-                        let result = match self.dispatch_task(task, &phase.required_capabilities) {
+                        let result = match self.dispatch_executable_task(
+                            task,
+                            &phase.required_capabilities,
+                            true,
+                        ) {
                             Err(e) => Err(e),
                             Ok(agent) => {
                                 agents_used.push(agent);
@@ -582,6 +619,38 @@ impl Orchestrator {
     /// Return a reference to the metrics collector.
     pub fn metrics(&self) -> &MetricsCollector {
         &self.metrics
+    }
+
+    /// Validate all assignments and registered capability coverage before any
+    /// worker invocation, then execute through the normal mission engine.
+    /// Preflight is a snapshot, not a reservation: later worker removal/load
+    /// changes can still fail execution. No agents are provisioned implicitly.
+    pub async fn run_specialist_plan(
+        &self,
+        plan: &crate::plan::SpecialistPlan,
+        limits: &crate::plan::PlanLimits,
+    ) -> DafResult<MissionResult> {
+        let mission = plan.to_mission(limits)?;
+        for phase in &mission.phases {
+            let covered = self.agents.iter().any(|entry| {
+                !entry.status.is_terminal()
+                    && self.workers.contains_key(entry.key())
+                    && phase.required_capabilities.iter().all(|required| {
+                        entry
+                            .manifest
+                            .capabilities
+                            .iter()
+                            .any(|cap| &cap.name == required)
+                    })
+            });
+            if !covered {
+                return Err(DafError::ConfigError(format!(
+                    "no registered worker covers all capabilities for specialist {}",
+                    phase.name
+                )));
+            }
+        }
+        self.run_mission_async(&mission).await
     }
 
     /// Return a reference to the specialist router.
@@ -770,6 +839,78 @@ mod tests {
             .retry_policy(crate::mission::RetryPolicy::none())
             .phase(Phase::new("run").task(sample_task("execute")))
             .build()
+    }
+
+    #[tokio::test]
+    async fn mission_admission_limit_and_duplicate_release_on_cancellation() {
+        let orch = Orchestrator::builder().max_concurrent_missions(1).build();
+        let agent = orch.spawn_agent(test_manifest("worker", &[])).unwrap();
+        orch.register_worker(
+            agent,
+            Arc::new(TestWorker {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                failures: 0,
+                hang: true,
+            }),
+        )
+        .unwrap();
+        let first = worker_mission();
+        let second = worker_mission();
+        let running = orch.run_mission_async(&first);
+        tokio::pin!(running);
+        tokio::select! {
+            _ = &mut running => panic!("hanging worker unexpectedly finished"),
+            _ = tokio::time::sleep(Duration::from_millis(5)) => {}
+        }
+        assert!(matches!(
+            orch.run_mission_async(&first).await,
+            Err(DafError::ConfigError(_))
+        ));
+        assert!(matches!(
+            orch.run_mission_async(&second).await,
+            Err(DafError::ResourceExhausted { .. })
+        ));
+        // Drop the pinned future's owner by exiting this scope in a helper test
+        // below; explicitly test a timeout releasing the lease here.
+    }
+
+    #[tokio::test]
+    async fn cancelled_mission_releases_admission_slot() {
+        let orch = Orchestrator::builder().max_concurrent_missions(1).build();
+        let agent = orch.spawn_agent(test_manifest("worker", &[])).unwrap();
+        orch.register_worker(
+            agent,
+            Arc::new(TestWorker {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                failures: 0,
+                hang: true,
+            }),
+        )
+        .unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(5),
+                orch.run_mission_async(&worker_mission())
+            )
+            .await
+            .is_err()
+        );
+        orch.register_worker(
+            agent,
+            Arc::new(TestWorker {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                failures: 0,
+                hang: false,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            orch.run_mission_async(&worker_mission())
+                .await
+                .unwrap()
+                .state,
+            MissionState::Completed
+        );
     }
 
     #[tokio::test]

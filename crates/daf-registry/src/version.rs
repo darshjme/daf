@@ -436,8 +436,14 @@ mod tests {
 
     #[test]
     fn constraint_display() {
-        assert_eq!(VersionConstraint::parse("^1.2.0").unwrap().to_string(), "^1.2.0");
-        assert_eq!(VersionConstraint::parse(">=2.0").unwrap().to_string(), ">=2.0.0");
+        assert_eq!(
+            VersionConstraint::parse("^1.2.0").unwrap().to_string(),
+            "^1.2.0"
+        );
+        assert_eq!(
+            VersionConstraint::parse(">=2.0").unwrap().to_string(),
+            ">=2.0.0"
+        );
         assert_eq!(VersionConstraint::parse("*").unwrap().to_string(), "*");
     }
 }

@@ -187,11 +187,7 @@ fn default_retry_delay() -> u64 {
 
 impl TaskDef {
     /// Create a minimal task definition.
-    pub fn new(
-        name: impl Into<String>,
-        module: impl Into<String>,
-        args: Value,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, module: impl Into<String>, args: Value) -> Self {
         Self {
             name: name.into(),
             module: module.into(),
@@ -509,8 +505,7 @@ impl Playbook {
                 .handlers
                 .iter()
                 .flat_map(|h| {
-                    std::iter::once(h.name.as_str())
-                        .chain(h.listen.iter().map(|l| l.as_str()))
+                    std::iter::once(h.name.as_str()).chain(h.listen.iter().map(|l| l.as_str()))
                 })
                 .collect();
 
@@ -618,9 +613,14 @@ mod tests {
 
     #[test]
     fn play_builder() {
-        let play = Play::new("configure workers").with_target(AgentSelector::Group("workers".into()))
+        let play = Play::new("configure workers")
+            .with_target(AgentSelector::Group("workers".into()))
             .with_task(TaskDef::new("set config", "config", json!({"key": "val"})))
-            .with_handler(Handler::new("restart", "command", json!({"cmd": "restart"})))
+            .with_handler(Handler::new(
+                "restart",
+                "command",
+                json!({"cmd": "restart"}),
+            ))
             .with_var("env", json!("production"));
 
         assert_eq!(play.name, "configure workers");
@@ -632,12 +632,10 @@ mod tests {
     #[test]
     fn playbook_builder() {
         let playbook = Playbook::new("deploy-v2")
+            .with_play(Play::new("setup").with_task(TaskDef::new("init", "config", json!({}))))
             .with_play(
-                Play::new("setup")
-                    .with_task(TaskDef::new("init", "config", json!({}))),
-            )
-            .with_play(
-                Play::new("configure").with_target(AgentSelector::Group("workers".into()))
+                Play::new("configure")
+                    .with_target(AgentSelector::Group("workers".into()))
                     .with_role(RoleRef::new("security-baseline")),
             )
             .with_var("version", json!("2.0"));
@@ -649,13 +647,11 @@ mod tests {
 
     #[test]
     fn playbook_validate_valid() {
-        let playbook = Playbook::new("valid")
-            .with_play(
-                Play::new("p1")
-                    .with_task(TaskDef::new("t1", "config", json!({}))
-                        .with_notify("h1"))
-                    .with_handler(Handler::new("h1", "command", json!({}))),
-            );
+        let playbook = Playbook::new("valid").with_play(
+            Play::new("p1")
+                .with_task(TaskDef::new("t1", "config", json!({})).with_notify("h1"))
+                .with_handler(Handler::new("h1", "command", json!({}))),
+        );
 
         let issues = playbook.validate();
         assert!(issues.is_empty(), "expected no issues, got: {issues:?}");
@@ -670,8 +666,7 @@ mod tests {
 
     #[test]
     fn playbook_validate_empty_task_list() {
-        let playbook = Playbook::new("no-tasks")
-            .with_play(Play::new("empty-play"));
+        let playbook = Playbook::new("no-tasks").with_play(Play::new("empty-play"));
 
         let issues = playbook.validate();
         assert!(issues.iter().any(|i| i.contains("no tasks and no roles")));
@@ -679,12 +674,10 @@ mod tests {
 
     #[test]
     fn playbook_validate_missing_handler() {
-        let playbook = Playbook::new("bad-notify")
-            .with_play(
-                Play::new("p1")
-                    .with_task(TaskDef::new("t1", "config", json!({}))
-                        .with_notify("nonexistent")),
-            );
+        let playbook = Playbook::new("bad-notify").with_play(
+            Play::new("p1")
+                .with_task(TaskDef::new("t1", "config", json!({})).with_notify("nonexistent")),
+        );
 
         let issues = playbook.validate();
         assert!(issues.iter().any(|i| i.contains("unknown handler")));
@@ -704,10 +697,7 @@ mod tests {
     #[test]
     fn playbook_serde_roundtrip() {
         let playbook = Playbook::new("serde-test")
-            .with_play(
-                Play::new("p1")
-                    .with_task(TaskDef::new("t1", "config", json!({"k": "v"}))),
-            );
+            .with_play(Play::new("p1").with_task(TaskDef::new("t1", "config", json!({"k": "v"}))));
 
         let json = serde_json::to_string(&playbook).unwrap();
         let back: Playbook = serde_json::from_str(&json).unwrap();
@@ -744,8 +734,7 @@ mod tests {
 
     #[test]
     fn task_ignore_errors() {
-        let task = TaskDef::new("risky", "command", json!({}))
-            .with_ignore_errors();
+        let task = TaskDef::new("risky", "command", json!({})).with_ignore_errors();
         assert!(task.ignore_errors);
     }
 }

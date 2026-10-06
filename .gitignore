@@ -13,3 +13,7 @@ data/
 .idea/
 .vscode/
 *.iml
+
+# Local Python acceptance helper caches
+__pycache__/
+*.pyc

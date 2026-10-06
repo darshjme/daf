@@ -36,9 +36,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use daf_core::AgentContext;
 use daf_core::error::DafResult;
 use daf_core::message::Message;
-use daf_core::AgentContext;
 
 use crate::task_types::{Event, SdkTaskResult, SdkTaskSpec};
 
@@ -53,11 +53,7 @@ use crate::task_types::{Event, SdkTaskResult, SdkTaskSpec};
 #[async_trait]
 pub trait MessageHandler: Send + Sync + 'static {
     /// Handle an inbound message within the given agent context.
-    async fn handle_message(
-        &self,
-        msg: Message,
-        ctx: &AgentContext,
-    ) -> DafResult<Option<Message>>;
+    async fn handle_message(&self, msg: Message, ctx: &AgentContext) -> DafResult<Option<Message>>;
 
     /// Human-readable name for this handler (used in logs and metrics).
     fn name(&self) -> &str {
@@ -73,11 +69,7 @@ pub trait MessageHandler: Send + Sync + 'static {
 #[async_trait]
 pub trait TaskHandler: Send + Sync + 'static {
     /// Execute the given task.
-    async fn handle_task(
-        &self,
-        task: SdkTaskSpec,
-        ctx: &AgentContext,
-    ) -> DafResult<SdkTaskResult>;
+    async fn handle_task(&self, task: SdkTaskSpec, ctx: &AgentContext) -> DafResult<SdkTaskResult>;
 
     /// Human-readable name for this handler.
     fn name(&self) -> &str {
@@ -112,7 +104,10 @@ pub trait EventHandler: Send + Sync + 'static {
 /// a separate struct.
 pub struct FnMessageHandler<F>
 where
-    F: Fn(Message, AgentContext) -> Pin<Box<dyn Future<Output = DafResult<Option<Message>>> + Send>>
+    F: Fn(
+            Message,
+            AgentContext,
+        ) -> Pin<Box<dyn Future<Output = DafResult<Option<Message>>> + Send>>
         + Send
         + Sync
         + 'static,
@@ -123,7 +118,10 @@ where
 
 impl<F> FnMessageHandler<F>
 where
-    F: Fn(Message, AgentContext) -> Pin<Box<dyn Future<Output = DafResult<Option<Message>>> + Send>>
+    F: Fn(
+            Message,
+            AgentContext,
+        ) -> Pin<Box<dyn Future<Output = DafResult<Option<Message>>> + Send>>
         + Send
         + Sync
         + 'static,
@@ -146,16 +144,15 @@ where
 #[async_trait]
 impl<F> MessageHandler for FnMessageHandler<F>
 where
-    F: Fn(Message, AgentContext) -> Pin<Box<dyn Future<Output = DafResult<Option<Message>>> + Send>>
+    F: Fn(
+            Message,
+            AgentContext,
+        ) -> Pin<Box<dyn Future<Output = DafResult<Option<Message>>> + Send>>
         + Send
         + Sync
         + 'static,
 {
-    async fn handle_message(
-        &self,
-        msg: Message,
-        ctx: &AgentContext,
-    ) -> DafResult<Option<Message>> {
+    async fn handle_message(&self, msg: Message, ctx: &AgentContext) -> DafResult<Option<Message>> {
         (self.func)(msg, ctx.clone()).await
     }
 
@@ -171,7 +168,10 @@ where
 /// Wraps an async closure as a [`TaskHandler`].
 pub struct FnTaskHandler<F>
 where
-    F: Fn(SdkTaskSpec, AgentContext) -> Pin<Box<dyn Future<Output = DafResult<SdkTaskResult>> + Send>>
+    F: Fn(
+            SdkTaskSpec,
+            AgentContext,
+        ) -> Pin<Box<dyn Future<Output = DafResult<SdkTaskResult>> + Send>>
         + Send
         + Sync
         + 'static,
@@ -182,7 +182,10 @@ where
 
 impl<F> FnTaskHandler<F>
 where
-    F: Fn(SdkTaskSpec, AgentContext) -> Pin<Box<dyn Future<Output = DafResult<SdkTaskResult>> + Send>>
+    F: Fn(
+            SdkTaskSpec,
+            AgentContext,
+        ) -> Pin<Box<dyn Future<Output = DafResult<SdkTaskResult>> + Send>>
         + Send
         + Sync
         + 'static,
@@ -205,16 +208,15 @@ where
 #[async_trait]
 impl<F> TaskHandler for FnTaskHandler<F>
 where
-    F: Fn(SdkTaskSpec, AgentContext) -> Pin<Box<dyn Future<Output = DafResult<SdkTaskResult>> + Send>>
+    F: Fn(
+            SdkTaskSpec,
+            AgentContext,
+        ) -> Pin<Box<dyn Future<Output = DafResult<SdkTaskResult>> + Send>>
         + Send
         + Sync
         + 'static,
 {
-    async fn handle_task(
-        &self,
-        task: SdkTaskSpec,
-        ctx: &AgentContext,
-    ) -> DafResult<SdkTaskResult> {
+    async fn handle_task(&self, task: SdkTaskSpec, ctx: &AgentContext) -> DafResult<SdkTaskResult> {
         (self.func)(task, ctx.clone()).await
     }
 
@@ -336,9 +338,7 @@ impl HandlerRegistry {
 
     /// Number of registered handlers across all categories.
     pub fn handler_count(&self) -> usize {
-        self.message_handlers.len()
-            + self.task_handlers.len()
-            + self.event_handlers.len()
+        self.message_handlers.len() + self.task_handlers.len() + self.event_handlers.len()
     }
 }
 
@@ -351,9 +351,30 @@ impl Default for HandlerRegistry {
 impl fmt::Debug for HandlerRegistry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HandlerRegistry")
-            .field("message_patterns", &self.message_handlers.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>())
-            .field("task_patterns", &self.task_handlers.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>())
-            .field("event_patterns", &self.event_handlers.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>())
+            .field(
+                "message_patterns",
+                &self
+                    .message_handlers
+                    .iter()
+                    .map(|(p, _)| p.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "task_patterns",
+                &self
+                    .task_handlers
+                    .iter()
+                    .map(|(p, _)| p.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "event_patterns",
+                &self
+                    .event_handlers
+                    .iter()
+                    .map(|(p, _)| p.as_str())
+                    .collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -400,11 +421,7 @@ impl HandlerChain {
 
 #[async_trait]
 impl MessageHandler for HandlerChain {
-    async fn handle_message(
-        &self,
-        msg: Message,
-        ctx: &AgentContext,
-    ) -> DafResult<Option<Message>> {
+    async fn handle_message(&self, msg: Message, ctx: &AgentContext) -> DafResult<Option<Message>> {
         let current_msg = msg;
 
         for handler in &self.handlers {
@@ -556,7 +573,10 @@ mod tests {
         let msg = test_msg();
 
         let result = chain.handle_message(msg.clone(), &ctx).await.unwrap();
-        assert!(result.is_some(), "chain should short-circuit at EchoHandler");
+        assert!(
+            result.is_some(),
+            "chain should short-circuit at EchoHandler"
+        );
     }
 
     #[tokio::test]
