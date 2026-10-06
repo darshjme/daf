@@ -5,8 +5,8 @@
 //! and the orchestrator figures out *how* to execute it.
 //!
 //! Missions are composed of [`Phase`]s, each containing a set of [`TaskSpec`]s.
-//! Phases execute sequentially (respecting dependency order), while tasks
-//! within a phase execute concurrently up to the phase's concurrency limit.
+//! Phases and their tasks execute sequentially in dependency order in the
+//! current mission engine. concurrency_limit is retained as planning metadata.
 //!
 //! # Serialization
 //!
@@ -128,8 +128,8 @@ impl RetryPolicy {
 /// execute together once the phase's dependencies are satisfied.
 ///
 /// Phases are the primary unit of sequential ordering in a mission. Within a
-/// phase, tasks run concurrently (up to `concurrency_limit`). Between phases,
-/// execution is gated by the dependency graph.
+/// phase, tasks currently run sequentially. Between phases, execution is gated
+/// by the dependency graph. concurrency_limit remains planning metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Phase {
     /// Human-readable name (e.g., `"build"`, `"deploy"`, `"smoke-test"`).
@@ -141,8 +141,9 @@ pub struct Phase {
     /// Names of phases that must complete successfully before this one starts.
     /// Empty means this phase has no dependencies and can start immediately.
     pub dependencies: Vec<String>,
-    /// Maximum number of tasks to run concurrently within this phase.
-    /// `None` means unlimited (all tasks run in parallel).
+    /// Planning metadata for a future concurrent phase executor.
+    /// The current mission engine executes tasks sequentially and does not
+    /// enforce this value.
     pub concurrency_limit: Option<usize>,
     /// Phase-level retry policy. Overrides the mission-level policy if set.
     pub retry_policy: Option<RetryPolicy>,

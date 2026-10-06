@@ -24,12 +24,14 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument, warn};
 
 use daf_core::AgentId;
@@ -109,7 +111,7 @@ pub struct Channel {
     pub created_at: DateTime<Utc>,
     /// Sender half of the bounded frame queue. The codec task reads from the
     /// matching receiver and writes frames to the socket.
-    outbound_tx: mpsc::Sender<Frame>,
+    queues: Arc<ChannelQueues>,
     /// Receiver half for inbound frames delivered by the codec task.
     inbound_rx: mpsc::Receiver<Frame>,
 }
@@ -134,12 +136,9 @@ impl Channel {
         }
 
         let frame = Frame::data(self.stream_id, payload);
-        self.outbound_tx
-            .send(frame)
+        self.queues
+            .send(&self.queues.outbound, frame, self.id)
             .await
-            .map_err(|_| ChannelError::SendFailed {
-                channel_id: self.id,
-            })
     }
 
     /// Send a pre-built frame through this channel.
@@ -147,12 +146,15 @@ impl Channel {
     /// Used internally for control frames (Ping, Close, etc.) that don't
     /// carry application payloads.
     pub async fn send_frame(&self, frame: Frame) -> Result<(), ChannelError> {
-        self.outbound_tx
-            .send(frame)
-            .await
-            .map_err(|_| ChannelError::SendFailed {
+        if self.state.is_terminal() {
+            return Err(ChannelError::NotOpen {
                 channel_id: self.id,
-            })
+                state: self.state,
+            });
+        }
+        self.queues
+            .send(&self.queues.outbound, frame, self.id)
+            .await
     }
 
     /// Receive the next inbound frame.
@@ -170,7 +172,12 @@ impl Channel {
 
     /// Approximate number of slots available in the outbound queue.
     pub fn outbound_capacity(&self) -> usize {
-        self.outbound_tx.capacity()
+        self.queues
+            .outbound
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map_or(0, mpsc::Sender::capacity)
     }
 }
 
@@ -197,18 +204,68 @@ pub struct ChannelInboundWriter {
     /// The channel this writer belongs to.
     pub channel_id: u32,
     /// Sender into the channel's inbound queue.
-    tx: mpsc::Sender<Frame>,
+    queues: Arc<ChannelQueues>,
 }
 
 impl ChannelInboundWriter {
     /// Deliver a frame to the channel's inbound queue.
     pub async fn deliver(&self, frame: Frame) -> Result<(), ChannelError> {
-        self.tx
-            .send(frame)
+        self.queues
+            .send(&self.queues.inbound, frame, self.channel_id)
             .await
-            .map_err(|_| ChannelError::SendFailed {
-                channel_id: self.channel_id,
-            })
+    }
+}
+
+/// Shared queue ownership lets pool teardown invalidate all previously cloned
+/// writers and disconnect a claimed outbound receiver after queued frames drain.
+#[derive(Debug)]
+struct ChannelQueues {
+    outbound: Mutex<Option<mpsc::Sender<Frame>>>,
+    inbound: Mutex<Option<mpsc::Sender<Frame>>>,
+    closed: CancellationToken,
+}
+
+impl ChannelQueues {
+    async fn send(
+        &self,
+        queue: &Mutex<Option<mpsc::Sender<Frame>>>,
+        frame: Frame,
+        channel_id: u32,
+    ) -> Result<(), ChannelError> {
+        let failed = || ChannelError::SendFailed { channel_id };
+        let sender = queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .cloned()
+            .ok_or_else(failed)?;
+        tokio::select! {
+            biased;
+            _ = self.closed.cancelled() => Err(failed()),
+            permit = sender.reserve() => {
+                let permit = permit.map_err(|_| failed())?;
+                // Serialize enqueue against close, after waiting for capacity.
+                // No synchronous lock is held across an await.
+                let guard = queue.lock().unwrap_or_else(|e| e.into_inner());
+                if guard.is_none() || self.closed.is_cancelled() {
+                    return Err(failed());
+                }
+                permit.send(frame);
+                Ok(())
+            }
+        }
+    }
+
+    fn close(&self) {
+        self.closed.cancel();
+        self.outbound
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        self.inbound
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
     }
 }
 
@@ -311,6 +368,11 @@ impl ChannelPool {
 
         // Inbound: socket → codec → application
         let (inbound_tx, inbound_rx) = mpsc::channel::<Frame>(self.channel_buffer_size);
+        let queues = Arc::new(ChannelQueues {
+            outbound: Mutex::new(Some(outbound_tx)),
+            inbound: Mutex::new(Some(inbound_tx)),
+            closed: CancellationToken::new(),
+        });
 
         let channel = Channel {
             id,
@@ -319,13 +381,13 @@ impl ChannelPool {
             stream_id,
             state: ChannelState::Opening,
             created_at: Utc::now(),
-            outbound_tx,
+            queues: queues.clone(),
             inbound_rx,
         };
 
         let writer = ChannelInboundWriter {
             channel_id: id,
-            tx: inbound_tx,
+            queues,
         };
 
         self.inbound_writers.insert(id, writer);
@@ -352,15 +414,17 @@ impl ChannelPool {
             .map(|(_, rx)| rx)
     }
 
-    /// Remove a channel from the pool (called during teardown).
+    /// Remove a channel from the pool and invalidate all existing send handles.
+    /// Already queued frames remain available until each receiver drains them.
     #[instrument(skip(self))]
     pub fn close(&self, channel_id: u32) {
         let _guard = self
             .lifecycle_lock
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        self.outbound_receivers.remove(&channel_id);
-        if let Some((_, _writer)) = self.inbound_writers.remove(&channel_id) {
+        if let Some((_, writer)) = self.inbound_writers.remove(&channel_id) {
+            writer.queues.close();
+            self.outbound_receivers.remove(&channel_id);
             // Find and remove the stream mapping.
             self.stream_to_channel.retain(|_, cid| *cid != channel_id);
             debug!(channel_id, "channel removed from pool");
@@ -396,6 +460,14 @@ impl ChannelPool {
 impl Default for ChannelPool {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for ChannelPool {
+    fn drop(&mut self) {
+        for writer in self.inbound_writers.iter() {
+            writer.queues.close();
+        }
     }
 }
 
@@ -472,6 +544,118 @@ mod tests {
         assert!(
             pool.open(AgentId::new(), AgentId::new()).is_ok(),
             "closed channels must release capacity"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_invalidates_stale_handles_and_preserves_queued_frames() {
+        let pool = ChannelPool::with_limits(1, 1);
+        let mut channel = pool.open(AgentId::new(), AgentId::new()).unwrap();
+        channel.state = ChannelState::Open;
+        let writer = pool.writer_for_stream(channel.stream_id).unwrap();
+        let mut outbound = pool.take_outbound_receiver(channel.id).unwrap();
+        channel
+            .send(Bytes::from_static(b"queued outbound"))
+            .await
+            .unwrap();
+        writer
+            .deliver(Frame::data(
+                channel.stream_id,
+                Bytes::from_static(b"queued inbound"),
+            ))
+            .await
+            .unwrap();
+
+        {
+            let send = channel.send(Bytes::from_static(b"blocked outbound"));
+            let deliver = writer.deliver(Frame::data(
+                channel.stream_id,
+                Bytes::from_static(b"blocked inbound"),
+            ));
+            tokio::pin!(send, deliver);
+            let wait = std::time::Duration::from_millis(10);
+            assert!(tokio::time::timeout(wait, &mut send).await.is_err());
+            assert!(tokio::time::timeout(wait, &mut deliver).await.is_err());
+            pool.close(channel.id);
+            let deadline = std::time::Duration::from_secs(1);
+            assert!(tokio::time::timeout(deadline, send).await.unwrap().is_err());
+            assert!(
+                tokio::time::timeout(deadline, deliver)
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
+        }
+
+        assert_eq!(
+            outbound.recv().await.unwrap().payload,
+            Bytes::from_static(b"queued outbound")
+        );
+        assert_eq!(
+            channel.recv().await.unwrap().payload,
+            Bytes::from_static(b"queued inbound")
+        );
+        let deadline = std::time::Duration::from_secs(1);
+        assert!(
+            tokio::time::timeout(deadline, outbound.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            tokio::time::timeout(deadline, channel.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(channel.send(Bytes::from_static(b"late")).await.is_err());
+        assert!(
+            channel
+                .send_frame(Frame::control(
+                    crate::protocol::FrameType::Close,
+                    channel.stream_id
+                ))
+                .await
+                .is_err()
+        );
+        assert!(
+            writer
+                .deliver(Frame::data(channel.stream_id, Bytes::new()))
+                .await
+                .is_err()
+        );
+        assert_eq!(channel.outbound_capacity(), 0);
+        assert!(pool.writer_for_stream(channel.stream_id).is_none());
+        assert!(pool.open(AgentId::new(), AgentId::new()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn dropping_pool_disconnects_claimed_receiver_and_cloned_writer() {
+        let pool = ChannelPool::new();
+        let mut channel = pool.open(AgentId::new(), AgentId::new()).unwrap();
+        channel.state = ChannelState::Open;
+        let writer = pool.writer_for_stream(channel.stream_id).unwrap();
+        let mut outbound = pool.take_outbound_receiver(channel.id).unwrap();
+        drop(pool);
+        assert!(channel.send(Bytes::new()).await.is_err());
+        assert!(
+            writer
+                .deliver(Frame::data(channel.stream_id, Bytes::new()))
+                .await
+                .is_err()
+        );
+        let deadline = std::time::Duration::from_secs(1);
+        assert!(
+            tokio::time::timeout(deadline, outbound.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            tokio::time::timeout(deadline, channel.recv())
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 

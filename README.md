@@ -7,7 +7,7 @@ Created by **Darshankumar Joshi** · Apache 2.0 · early development, v0.1.0
 
 DAF makes agent infrastructure inspectable: dependency graphs, bounded execution, typed messages, encrypted secrets and persistent records. Applications supply their models, handlers and policies. Our ambition is advanced autonomous systems; our claims are limited to behavior demonstrated by code and tests.
 
-[Engineering standard](docs/STANDARD.md) · [Audit and remaining gaps](docs/AUDIT-2026-10-06.md) · [Architecture](ARCHITECTURE.md) · [Runnable examples](examples/README.md) · [DDAL](docs/DDAL.md) · [Memory](docs/MEMORY.md)
+[Engineering standard](docs/STANDARD.md) · [Audit and remaining gaps](docs/AUDIT-2026-10-06.md) · [Swarm verification](docs/SWARM-VALIDATION-2026-10-06.md) · [Architecture](ARCHITECTURE.md) · [Runnable examples](examples/README.md) · [DDAL](docs/DDAL.md) · [Memory](docs/MEMORY.md)
 
 ## Run your first mission
 
@@ -19,6 +19,7 @@ cd daf
 cargo build --locked -p daf
 mkdir demo && cd demo
 ../target/debug/daf init --name demo --yes
+../target/debug/daf run mission.yml --dry-run
 ../target/debug/daf run mission.yml --yes
 ```
 
@@ -39,7 +40,19 @@ mission:
         command: ["cargo", "test", "--locked", "-p", "daf-graph"]
 ```
 
-Save this mission in the repository and run `target/debug/daf run mission.yml --yes --parallelism 4 --timeout 300`. Working directories resolve from the mission file. The complete graph and directories are validated before execution; failed dependencies are skipped. `--format json` produces ordered task outcomes on stdout, with command output on stderr. Timeouts terminate and reap the direct child; detached descendants remain the command’s responsibility.
+Save this mission in the repository and preview it with `target/debug/daf run mission.yml --dry-run`. Preview shows dependency waves, argv, directories and limits without starting commands; `--format json` makes the plan machine readable. Execute with `--yes --parallelism 4 --timeout 300`. Working directories resolve from the mission file. The complete graph and directories are validated before execution; failed dependencies are skipped. `--format json` produces ordered task outcomes on stdout, with command output on stderr. Timeouts terminate and reap the direct child; detached descendants remain the command’s responsibility.
+
+## Build a specialist team
+
+`SpecialistPlan` connects a reviewed JSON plan to registered `WorkerHandler` implementations. It checks every dependency and required capability before dispatch, excludes agents without an executable handler, and bounds assignment count, bytes, deadlines and retries. The default admits up to 32 assignments. This orchestrator path executes sequentially; the CLI and graph executors provide separate bounded concurrency paths.
+
+```sh
+cargo run --locked -p daf-orchestrator --example specialist_plan
+```
+
+The example registers three handlers and runs prepare → review → verify. Applications supply meaningful handlers and model calls. Use [the team guide](docs/SWARM.md) to connect DAF, DDAL and [DJcode](https://github.com/darshjme/djcode), which provides interactive coding, tool approvals and project flows.
+
+![Reviewed plans, bounded execution and evidence](assets/swarm.svg)
 
 ## Compose the libraries
 
@@ -73,7 +86,8 @@ The [standard](docs/STANDARD.md) defines 22 measurable requirements across execu
 ```sh
 cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
-cargo test --locked --workspace
+cargo test --locked --workspace --all-targets
+cargo test --locked --workspace --doc
 cargo doc --locked --workspace --no-deps
 cargo build --locked -p daf
 python3 scripts/check_local_cli.py

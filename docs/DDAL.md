@@ -40,6 +40,8 @@ Conversation UUIDs, turns and episode context are application/payload data. They
 
 `DdalCodec` decodes partial input through `tokio_util::codec`. Incomplete input waits for more bytes; invalid/oversized input returns an error. Applications must bound connections and deadlines as well as frames. Flags express metadata; setting a compression or fragmentation flag does not perform compression or reassembly automatically.
 
+Invalid frame types and incompatible versions reject at header admission. An advertised payload length does not trigger allocation of the whole payload; buffering grows with received bytes. Raw serialization allocates from the actual payload, and codec encoding checks the declared length against it.
+
 Payload helpers serialize Bincode, MessagePack and JSON. `detect_format` is a heuristic; applications should use an explicitly agreed format. The generic `Raw` helper currently uses Bincode; callers requiring truly raw bytes should supply `Bytes` directly as the frame payload.
 
 ## Connection handshake
@@ -61,7 +63,7 @@ sequenceDiagram
 
 ## Channels and transport
 
-`ChannelPool` bounds logical channel count and queue capacity. A transport pump must take a channel's outbound receiver and deliver incoming frames through its writer. Opening a channel does not automatically create a network connection or task pump. Close releases capacity; applications must manage the network pump lifecycle.
+`ChannelPool` bounds logical channel count and queue capacity. A transport pump must take a channel's outbound receiver and deliver incoming frames through its writer. Opening a channel does not automatically create a network connection or task pump. Close releases capacity, wakes blocked queue sends and prevents stale cloned writers from sending. Claimed receivers drain queued frames and then reach EOF, including when the pool is dropped. Applications must manage the network pump lifecycle.
 
 TCP provides ordered bytes and can still have head-of-line blocking across multiplexed logical streams. DDAL does not establish exactly-once delivery, durable acknowledgement, reconnection replay or cross-node consensus. Define these at the application layer before advertising them.
 

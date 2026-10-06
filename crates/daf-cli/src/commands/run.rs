@@ -14,6 +14,9 @@ pub struct RunArgs {
     pub mission: PathBuf,
     #[arg(short, long)]
     pub yes: bool,
+    /// Validate and preview commands and dependency waves without executing.
+    #[arg(long, conflicts_with = "yes")]
+    pub dry_run: bool,
     #[arg(long, default_value_t = 8)]
     pub parallelism: usize,
     #[arg(long, default_value_t = 300)]
@@ -215,6 +218,39 @@ pub async fn exec(args: &RunArgs, cli: &Cli) -> Result<()> {
             "  {}: {:?} after {:?}",
             task.name, task.params.command, task.depends_on
         );
+    }
+    if args.dry_run {
+        let mut remaining: Vec<_> = mission.tasks.iter().collect();
+        let mut complete = HashSet::new();
+        let mut waves = Vec::new();
+        while !remaining.is_empty() {
+            let ready: Vec<_> = remaining
+                .iter()
+                .filter(|task| task.depends_on.iter().all(|dep| complete.contains(dep)))
+                .map(|task| task.name.clone())
+                .collect();
+            remaining.retain(|task| !ready.contains(&task.name));
+            complete.extend(ready.iter().cloned());
+            waves.push(ready);
+        }
+        if json {
+            let tasks: Vec<_> = mission.tasks.iter().map(|task| serde_json::json!({"name":task.name,"agent":task.agent,"command":task.params.command,"cwd":root.join(task.params.cwd.as_deref().unwrap_or(std::path::Path::new("."))),"depends_on":task.depends_on})).collect();
+            crate::display::format_json(
+                &serde_json::json!({"mission":mission.name,"status":"planned","parallelism":args.parallelism,"timeout_seconds":args.timeout,"waves":waves,"tasks":tasks}),
+            )?;
+        } else {
+            println!(
+                "Validated {} tasks · concurrency {} · deadline {}s per task",
+                mission.tasks.len(),
+                args.parallelism,
+                args.timeout
+            );
+            for (index, wave) in waves.iter().enumerate() {
+                println!("Wave {}: {}", index + 1, wave.join(", "));
+            }
+            println!("Preview complete. Run with --yes when ready to execute.");
+        }
+        return Ok(());
     }
     if !args.yes
         && !Confirm::new()

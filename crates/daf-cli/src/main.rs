@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 use clap::Parser;
+use std::io::IsTerminal;
 use tracing_subscriber::{EnvFilter, fmt};
 
 use daf::display::banner;
@@ -33,11 +34,12 @@ async fn main() -> Result<()> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter)),
         )
         .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none())
         .with_target(false)
         .init();
 
     // ---------- banner ---------------------------------------------------
-    if !quiet && !matches!(format, daf::OutputFormat::Json) {
+    if !quiet && std::io::stderr().is_terminal() && !matches!(format, daf::OutputFormat::Json) {
         banner();
     }
 

@@ -13,6 +13,20 @@ with tempfile.TemporaryDirectory(prefix='daf-acceptance-') as directory:
         return str(p)
     def task(name,command,deps=()):return {'name':name,'agent':'local','depends_on':deps,'params':{'command':command}}
     p=mission([task('verify',['/bin/test','-f','created'],['create']),task('create',['/usr/bin/touch','created'])])
+    r=run('--format','json','run',p,'--dry-run')
+    preview=json.loads(r.stdout)
+    assert r.returncode==0 and preview['status']=='planned' and preview['waves']==[['create'],['verify']]
+    assert not (root/'created').exists() and preview['tasks'][1]['command']==['/usr/bin/touch','created']
+    results['dry_run_plans_without_effects']=True
+    r=run('run',p,'--dry-run')
+    assert r.returncode==0 and 'Wave 1: create' in r.stdout and 'Wave 2: verify' in r.stdout and not (root/'created').exists()
+    results['dry_run_text_is_actionable']=True
+    r=run('run',p,'--dry-run','--yes')
+    assert r.returncode!=0 and not (root/'created').exists()
+    results['dry_run_conflicts_with_execution']=True
+    r=subprocess.run([binary,'run',p,'--dry-run'],cwd=root,env={**os.environ,'NO_COLOR':'1'},capture_output=True,text=True,timeout=20)
+    assert r.returncode==0 and '\x1b[' not in r.stdout+r.stderr and '██' not in r.stderr
+    results['redirected_output_is_plain_and_compact']=True
     r=run('run',p,'--yes')
     assert r.returncode==0,r.stderr
     results['out_of_order_dependency_executes']=True

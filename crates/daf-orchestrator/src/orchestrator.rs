@@ -254,13 +254,28 @@ impl Orchestrator {
         task: &TaskSpec,
         required_capabilities: &[String],
     ) -> DafResult<AgentId> {
+        self.dispatch_executable_task(task, required_capabilities, false)
+    }
+
+    fn dispatch_executable_task(
+        &self,
+        task: &TaskSpec,
+        required_capabilities: &[String],
+        require_worker: bool,
+    ) -> DafResult<AgentId> {
         if self.is_shutting_down() {
             return Err(DafError::Internal(
                 "orchestrator is shutting down, cannot dispatch".into(),
             ));
         }
 
-        let decision = self.router.route_task(task, required_capabilities, None)?;
+        let decision = if require_worker {
+            let allowed = self.workers.iter().map(|worker| *worker.key()).collect();
+            self.router
+                .route_task_for_agents(task, required_capabilities, &allowed)?
+        } else {
+            self.router.route_task(task, required_capabilities, None)?
+        };
 
         // Update the agent's active task count.
         if let Some(mut entry) = self.agents.get_mut(&decision.agent_id) {
@@ -416,7 +431,11 @@ impl Orchestrator {
                             }
                             retries_used += 1;
                         }
-                        let result = match self.dispatch_task(task, &phase.required_capabilities) {
+                        let result = match self.dispatch_executable_task(
+                            task,
+                            &phase.required_capabilities,
+                            true,
+                        ) {
                             Err(e) => Err(e),
                             Ok(agent) => {
                                 agents_used.push(agent);
@@ -600,6 +619,38 @@ impl Orchestrator {
     /// Return a reference to the metrics collector.
     pub fn metrics(&self) -> &MetricsCollector {
         &self.metrics
+    }
+
+    /// Validate all assignments and registered capability coverage before any
+    /// worker invocation, then execute through the normal mission engine.
+    /// Preflight is a snapshot, not a reservation: later worker removal/load
+    /// changes can still fail execution. No agents are provisioned implicitly.
+    pub async fn run_specialist_plan(
+        &self,
+        plan: &crate::plan::SpecialistPlan,
+        limits: &crate::plan::PlanLimits,
+    ) -> DafResult<MissionResult> {
+        let mission = plan.to_mission(limits)?;
+        for phase in &mission.phases {
+            let covered = self.agents.iter().any(|entry| {
+                !entry.status.is_terminal()
+                    && self.workers.contains_key(entry.key())
+                    && phase.required_capabilities.iter().all(|required| {
+                        entry
+                            .manifest
+                            .capabilities
+                            .iter()
+                            .any(|cap| &cap.name == required)
+                    })
+            });
+            if !covered {
+                return Err(DafError::ConfigError(format!(
+                    "no registered worker covers all capabilities for specialist {}",
+                    phase.name
+                )));
+            }
+        }
+        self.run_mission_async(&mission).await
     }
 
     /// Return a reference to the specialist router.

@@ -72,7 +72,20 @@ impl StaticCredential {
         task_names: Vec<String>,
     ) -> Result<Self, RemoteError> {
         let principal = principal.into();
-        if credential.len() < 32 || principal.is_empty() || task_names.is_empty() {
+        if !(32..=4096).contains(&credential.len())
+            || principal.trim().is_empty()
+            || principal.len() > 4096
+            || task_names.is_empty()
+            || task_names.len() > 128
+            || task_names
+                .iter()
+                .any(|name| name.trim().is_empty() || name.len() > 256)
+            || task_names
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != task_names.len()
+        {
             return Err(RemoteError::Configuration(
                 "credential requires >=32 bytes, principal and explicit task names".into(),
             ));
@@ -88,6 +101,9 @@ impl StaticCredential {
 }
 impl CredentialVerifier for StaticCredential {
     fn verify(&self, credential: &str) -> Option<String> {
+        if !(32..=4096).contains(&credential.len()) {
+            return None;
+        }
         let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"DAF remote credential digest v1");
         ring::hmac::verify(&key, credential.as_bytes(), &self.digest)
             .ok()
@@ -161,7 +177,11 @@ fn validate(
             "TLS required outside loopback".into(),
         ));
     }
-    if timeout.is_zero() || cap <= HEADER_SIZE || cap > HEADER_SIZE + MAX_PAYLOAD_SIZE as usize {
+    if timeout.is_zero()
+        || std::time::Instant::now().checked_add(timeout).is_none()
+        || cap <= HEADER_SIZE
+        || cap > HEADER_SIZE + MAX_PAYLOAD_SIZE as usize
+    {
         return Err(RemoteError::Configuration(
             "positive timeout and bounded frame size required".into(),
         ));
@@ -246,7 +266,7 @@ impl RemoteWorker {
                             let mut conn:Box<dyn Connection>=if let Some(t)=tls {Box::new(t.accept_tls(stream).await.map_err(protocol)?)} else {Box::new(TcpConnection::from_stream(stream,peer.to_string()))};
                             let request:Request=read_json(&mut *conn,cap).await?;
                             let result=if let Some(principal)=verifier.verify(&request.credential).filter(|p|!p.is_empty()) {
-                                let result=if verifier.authorize(&principal,&request.task.task) {executor.execute(&principal,request.task.clone()).await}else{Err("task authorization rejected".into())};
+                                let result=if verifier.authorize(&principal,&request.task.task) {executor.execute(&principal,request.task.clone()).await.map_err(|_| "execution rejected".to_owned())}else{Err("task authorization rejected".into())};
                                 if let (Ok(result),Some(o))=(&result,observer) {o.before_reply(&principal,&request.task,result).await;}
                                 result
                             }else{Err("authentication rejected".into())};
@@ -470,6 +490,10 @@ mod tests {
             )
             .is_err()
         );
+        assert!(
+            RemoteClient::new("127.0.0.1:1234".parse().unwrap(), None, Duration::MAX, 1000)
+                .is_err()
+        );
         assert!(StaticCredential::new("short", "principal", vec!["echo".into()]).is_err());
         let v = StaticCredential::new(TOKEN, "canonical", vec!["echo".into()]).unwrap();
         assert_eq!(v.verify(TOKEN).as_deref(), Some("canonical"));
@@ -633,5 +657,122 @@ mod tests {
         assert_eq!(active.load(Ordering::SeqCst), 0);
         stop.send(()).unwrap();
         worker.await.unwrap().unwrap();
+    }
+    #[test]
+    fn credential_policy_is_exact_bounded_and_default_denied() {
+        assert!(StaticCredential::new(TOKEN, "principal", vec!["".into()]).is_err());
+        assert!(
+            StaticCredential::new(TOKEN, "principal", vec!["echo".into(), "echo".into()]).is_err()
+        );
+        assert!(StaticCredential::new(TOKEN, " ", vec!["echo".into()]).is_err());
+        assert!(
+            StaticCredential::new(&"x".repeat(4097), "principal", vec!["echo".into()]).is_err()
+        );
+        let v = StaticCredential::new(TOKEN, "principal", vec!["echo".into()]).unwrap();
+        assert!(v.authorize("principal", &SdkTaskSpec::new("echo", "allowed")));
+        assert!(!v.authorize("other", &SdkTaskSpec::new("echo", "wrong principal")));
+        assert!(!v.authorize("principal", &SdkTaskSpec::new("echo.extra", "wrong name")));
+        assert!(!v.authorize("principal", &SdkTaskSpec::new("Echo", "case differs")));
+        struct IdentityOnly;
+        impl CredentialVerifier for IdentityOnly {
+            fn verify(&self, _: &str) -> Option<String> {
+                Some("principal".into())
+            }
+        }
+        assert!(!IdentityOnly.authorize("principal", &SdkTaskSpec::new("echo", "no policy")));
+    }
+    struct SecretError;
+    #[async_trait]
+    impl RemoteTaskExecutor for SecretError {
+        async fn execute(&self, _: &str, _: TaskEnvelope) -> Result<SdkTaskResult, String> {
+            Err("secret credential or internal storage path".into())
+        }
+    }
+    #[tokio::test]
+    async fn executor_error_details_are_not_sent_to_remote_peer() {
+        let (addr, stop, worker) = launch(Default::default(), Arc::new(SecretError)).await;
+        let error = client(addr, None)
+            .submit(TOKEN, TaskEnvelope::new(SdkTaskSpec::new("echo", "error")))
+            .await
+            .unwrap_err();
+        assert!(matches!(error,RemoteError::Rejected(ref text) if text=="execution rejected"));
+        stop.send(()).unwrap();
+        worker.await.unwrap().unwrap();
+    }
+    #[tokio::test]
+    async fn silent_session_deadline_releases_admission_slot() {
+        let executor = Arc::new(Echo(AtomicUsize::new(0)));
+        let (addr, stop, worker) = launch(
+            RemoteWorkerConfig {
+                max_sessions: 1,
+                session_timeout: Duration::from_millis(100),
+                ..Default::default()
+            },
+            executor.clone(),
+        )
+        .await;
+        let mut stalled = tokio::net::TcpStream::connect(addr).await.unwrap();
+        use tokio::io::AsyncWriteExt;
+        stalled.write_all(b"D").await.unwrap();
+        let result = client(addr, None)
+            .submit(
+                TOKEN,
+                TaskEnvelope::new(SdkTaskSpec::new("echo", "after stalled peer")),
+            )
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert_eq!(executor.0.load(Ordering::SeqCst), 1);
+        stop.send(()).unwrap();
+        worker.await.unwrap().unwrap();
+    }
+    struct HangingObserver(Arc<AtomicUsize>);
+    #[async_trait]
+    impl ReplyObserver for HangingObserver {
+        async fn before_reply(&self, _: &str, _: &TaskEnvelope, _: &SdkTaskResult) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let _guard = Guard(self.0.clone());
+            std::future::pending::<()>().await;
+        }
+    }
+    #[tokio::test]
+    async fn shutdown_cancels_post_execution_observer() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let worker = RemoteWorker::bind(
+            Default::default(),
+            verifier(),
+            Arc::new(Echo(AtomicUsize::new(0))),
+        )
+        .await
+        .unwrap()
+        .with_observer(Arc::new(HangingObserver(active.clone())));
+        let addr = worker.local_addr();
+        let (stop, rx) = tokio::sync::oneshot::channel();
+        let running = tokio::spawn(worker.run(async {
+            let _ = rx.await;
+        }));
+        let caller = tokio::spawn(async move {
+            client(addr, None)
+                .submit(
+                    TOKEN,
+                    TaskEnvelope::new(SdkTaskSpec::new("echo", "observer")),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while active.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        stop.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), running)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert!(caller.await.unwrap().is_err());
     }
 }

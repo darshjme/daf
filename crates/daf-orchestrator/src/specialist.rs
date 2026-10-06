@@ -348,11 +348,34 @@ impl SpecialistRouter {
         required_capabilities: &[String],
         context_key: Option<&str>,
     ) -> DafResult<RoutingDecision> {
+        self.route_task_filtered(task, required_capabilities, context_key, None)
+    }
+
+    /// Route only to a caller-provided set of executable agent IDs.
+    pub fn route_task_for_agents(
+        &self,
+        task: &TaskSpec,
+        required_capabilities: &[String],
+        allowed: &std::collections::HashSet<AgentId>,
+    ) -> DafResult<RoutingDecision> {
+        self.route_task_filtered(task, required_capabilities, None, Some(allowed))
+    }
+
+    fn route_task_filtered(
+        &self,
+        task: &TaskSpec,
+        required_capabilities: &[String],
+        context_key: Option<&str>,
+        allowed: Option<&std::collections::HashSet<AgentId>>,
+    ) -> DafResult<RoutingDecision> {
         let mut candidates: Vec<RoutingDecision> = Vec::new();
 
         for entry in self.agents.iter() {
             let agent_id = *entry.key();
             let manifest = entry.value();
+            if allowed.is_some_and(|ids| !ids.contains(&agent_id)) {
+                continue;
+            }
 
             // Skip agents that aren't idle or executing (can take more work).
             if let Some(status) = self.status.get(&agent_id) {

@@ -163,10 +163,8 @@ impl DurableLedger {
             "dependency_results".into(),
             Value::Object(dependency_results),
         );
-        if request.len() > 1_048_576 || dependencies.len() > 128 {
-            return Err(DurableError::Invalid(
-                "request or dependency limit exceeded".into(),
-            ));
+        if serde_json::to_vec(&task)?.len() > 1_048_576 {
+            return Err(DurableError::Invalid("resolved task exceeds 1 MiB".into()));
         }
         let key = result_key(task.id);
         let _lease = self.preparation.lock().await;
@@ -425,6 +423,173 @@ mod tests {
             ledger.execute("bob", task, &agent).await,
             Err(DurableError::Conflict)
         ));
+        agent.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn dependency_size_and_principal_gates_run_before_handler() {
+        struct Blob(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl TaskHandler for Blob {
+            async fn handle_task(
+                &self,
+                task: SdkTaskSpec,
+                _: &AgentContext,
+            ) -> DafResult<SdkTaskResult> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                let output = DurableTaskOutput {
+                    output: Value::String("x".repeat(600_000)),
+                    effects: vec![],
+                };
+                Ok(SdkTaskResult::success(
+                    task.id,
+                    serde_json::to_value(output).unwrap(),
+                    Duration::ZERO,
+                ))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = DurableLedger::open(dir.path()).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let agent = AgentBuilder::new("blob")
+            .on_task("blob", Blob(calls.clone()))
+            .build()
+            .unwrap();
+        agent.start().await.unwrap();
+        let first = SdkTaskSpec::new("blob", "one");
+        let second = SdkTaskSpec::new("blob", "two");
+        ledger
+            .execute("alice", first.clone(), &agent)
+            .await
+            .unwrap();
+        ledger
+            .execute("alice", second.clone(), &agent)
+            .await
+            .unwrap();
+        let dependent = SdkTaskSpec::new("blob", "large dependencies");
+        assert!(matches!(
+            ledger
+                .execute_with_dependencies(
+                    "alice",
+                    dependent.clone(),
+                    &[first.id, second.id],
+                    &agent
+                )
+                .await,
+            Err(DurableError::Invalid(_))
+        ));
+        let expanded = SdkTaskSpec::new("blob", "large resolved input")
+            .with_inputs(serde_json::json!({"large":"y".repeat(600_000)}));
+        assert!(matches!(
+            ledger
+                .execute_with_dependencies("alice", expanded, &[first.id], &agent)
+                .await,
+            Err(DurableError::Invalid(_))
+        ));
+        assert!(matches!(
+            ledger
+                .execute_with_dependencies("bob", dependent.clone(), &[first.id], &agent)
+                .await,
+            Err(DurableError::Conflict)
+        ));
+        assert!(
+            ledger
+                .execute_with_dependencies("alice", dependent.clone(), &[first.id; 129], &agent)
+                .await
+                .is_err()
+        );
+        assert!(
+            ledger
+                .execute_with_dependencies(
+                    "alice",
+                    dependent.clone(),
+                    &[first.id, first.id],
+                    &agent
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            ledger
+                .execute_with_dependencies("alice", dependent.clone(), &[dependent.id], &agent)
+                .await
+                .is_err()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(ledger.lookup("alice", dependent.id).unwrap().is_none());
+        agent.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn caller_cancellation_and_failed_predecessors_never_unlock_dependents() {
+        struct Failure;
+        #[async_trait::async_trait]
+        impl TaskHandler for Failure {
+            async fn handle_task(
+                &self,
+                task: SdkTaskSpec,
+                _: &AgentContext,
+            ) -> DafResult<SdkTaskResult> {
+                Ok(SdkTaskResult::failure(
+                    task.id,
+                    "controlled",
+                    Duration::ZERO,
+                ))
+            }
+        }
+        struct Hanging;
+        #[async_trait::async_trait]
+        impl TaskHandler for Hanging {
+            async fn handle_task(
+                &self,
+                _: SdkTaskSpec,
+                _: &AgentContext,
+            ) -> DafResult<SdkTaskResult> {
+                std::future::pending().await
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = DurableLedger::open(dir.path()).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let agent = AgentBuilder::new("gated")
+            .on_task("fail", Failure)
+            .on_task("hang", Hanging)
+            .on_task("prepare", Prepare(calls.clone()))
+            .build()
+            .unwrap();
+        agent.start().await.unwrap();
+        let failed = SdkTaskSpec::new("fail", "failure");
+        assert!(
+            !ledger
+                .execute("alice", failed.clone(), &agent)
+                .await
+                .unwrap()
+                .success
+        );
+        let hanging = SdkTaskSpec::new("hang", "cancelled");
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                ledger.execute("alice", hanging.clone(), &agent)
+            )
+            .await
+            .is_err()
+        );
+        assert!(ledger.lookup("alice", hanging.id).unwrap().is_none());
+        for predecessor in [failed.id, hanging.id] {
+            let dependent = SdkTaskSpec::new("prepare", "must not execute");
+            assert!(
+                ledger
+                    .execute_with_dependencies("alice", dependent.clone(), &[predecessor], &agent)
+                    .await
+                    .is_err()
+            );
+            assert!(ledger.lookup("alice", dependent.id).unwrap().is_none());
+        }
+        // Cancellation released the ledger lease; independent work still runs.
+        ledger
+            .execute("alice", SdkTaskSpec::new("prepare", "independent"), &agent)
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         agent.stop().await.unwrap();
     }
 }
