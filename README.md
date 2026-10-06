@@ -58,11 +58,13 @@ This is an application composition. The runtime does not automatically connect e
 | Component | Demonstrated behavior | Boundary |
 | :--- | :--- | :--- |
 | Graph / orchestrator / SDK | Real handler execution, conditional recovery, admission limits, cancellation, middleware and deadlines | Output-dependent routing fails explicitly until implemented |
-| DDAL / transport | Bounded frame codec, checksums, explicit channel pumping, TCP and opt-in mutual TLS | Checksums do not authenticate peers; applications supply handshake authorization |
+| DDAL / transport | Bounded frame codec, checksums, explicit channel pumping, TCP and opt-in mutual TLS | Checksums do not authenticate peers; remote worker supplies scoped credential authorization |
 | Memory / logger | In-memory, Sled and RocksDB stores; filtered recall; heuristic consolidation; rotation | No embeddings, learned cognition or cross-store transactions |
 | Vault | AES-256-GCM encrypted Sled secrets, password rejection, persistent rotation | Low-level access policies require application enforcement |
 | CLI | Local missions, vault operations, initialization and static previews | Cluster control and apply operations report unsupported errors |
-| Runtime / registry | Lifecycle, shutdown, discovery and truthful unknown subsystem health | No production distributed dispatcher or consensus |
+| Runtime / registry | Lifecycle, shutdown, discovery and truthful unknown subsystem health | Authenticated durable remote worker available; no fleet scheduler or consensus |
+
+Run the [authenticated durable remote example](docs/REMOTE.md) to persist results, retry stable task IDs after restart, and feed recovered outputs into dependent tasks.
 
 The [standard](docs/STANDARD.md) defines 22 measurable requirements across execution, security, memory, distribution, observation, models and developer experience. It is a project acceptance contract, with per-path evidence levels. Passing component tests does not establish AGI or ASI.
 
@@ -77,7 +79,7 @@ cargo build --locked -p daf
 python3 scripts/check_local_cli.py
 ```
 
-Integration tests exercise exported graph → orchestrator → SDK execution and loopback TCP → DDAL → SDK → persistent Sled reopen, including rejection paths. See the dated audit for actual results and limitations. GitHub Actions is disabled; verification runs locally.
+Integration tests exercise exported graph → orchestrator → SDK execution and loopback TCP → DDAL → SDK → persistent Sled reopen, including rejection paths. A separate worker-process acceptance test uses SIGKILL after durable commit, then checks authenticated replay and dependent execution after restart. See the dated audit for actual results and limitations. GitHub Actions is disabled; verification runs locally.
 
 `daf vault init`, `set`, `get`, `list` and `rotate` operate on `.daf/vault`. Password entry is hidden; automation can use `DAF_VAULT_PASSWORD` and `DAF_VAULT_DIR`. Secret values remain hidden unless `get --raw` is requested.
 

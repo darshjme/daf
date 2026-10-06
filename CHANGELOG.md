@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Non-destructive project initialization, strict local mission validation and ordered JSON task outcomes.
 
 ### Added
+- Authenticated TCP/TLS remote worker and client with bounded DDAL sessions, explicit task scope and cancellation.
+- Durable SDK preparation ledger with atomic declared effects/results, request identity binding, dependent outputs and process-crash replay acceptance.
+- Runnable remote worker/client example with persisted task manifests.
 - Explicit asynchronous Sled persistence fence before durability-sensitive acknowledgements.
 - Evidence-based engineering standard, source-grounded architecture/protocol/memory documentation and real execution/TCP/persistence acceptance tests.
 

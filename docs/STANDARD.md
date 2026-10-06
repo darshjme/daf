@@ -50,3 +50,5 @@ Conformance is per path, not per repository. Current DAF provides component libr
 A conformance record must name the source commit, toolchain, environment, commands, outcomes, fixtures, unsupported paths and residual risks. Tests of local stand-ins must be identified as simulations and cannot stand in for tests of DAF public APIs. Benchmark reports must include hardware, payload/workload, sample size and latency distribution; targets are not measurements.
 
 The audit report in [AUDIT-2026-10-06.md](AUDIT-2026-10-06.md) records the repairs and current gaps. Conformance must be rechecked after changes to security, execution, storage or configuration.
+
+The [remote milestone](REMOTE.md) adds real process-crash evidence for scoped ledger effects and receipt replay (EX-05, DI-01, DI-03), authenticated task scope (SE-01/02), bounded sessions and cancellation (EX-03/04). These are path-specific results: they do not establish external-effect idempotency, tool sandboxing, fleet consensus or model intelligence.

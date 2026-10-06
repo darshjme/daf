@@ -321,7 +321,7 @@ async fn failure_skips_dependent_nodes() {
 // Test: Cancellation mid-execution
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn cancellation_mid_execution() {
     init_tracing();
 
@@ -336,9 +336,9 @@ async fn cancellation_mid_execution() {
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_clone = cancel.clone();
 
-    // Schedule cancellation after a short delay (enough for first 2 waves).
+    // Virtual time prevents host scheduling load from racing chain completion.
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::time::sleep(Duration::from_millis(15)).await;
         cancel_clone.store(true, Ordering::Relaxed);
     });
 

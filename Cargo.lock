@@ -836,6 +836,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "daf-example-remote-worker"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "daf-core",
+ "daf-ddal",
+ "daf-runtime",
+ "daf-sdk",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "daf-graph"
 version = "0.1.0"
 dependencies = [
@@ -997,6 +1012,7 @@ name = "daf-runtime"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "chrono",
  "crossbeam",
  "daf-core",
@@ -1006,14 +1022,18 @@ dependencies = [
  "daf-memory",
  "daf-orchestrator",
  "daf-registry",
+ "daf-sdk",
  "daf-transport",
  "dashmap",
  "parking_lot 0.12.5",
+ "ring",
  "serde",
  "serde_json",
+ "sled",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "uuid",

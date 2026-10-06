@@ -21,6 +21,7 @@ members = [
     "examples/multi-agent",
     "examples/infrastructure",
     "examples/configuration",
+    "examples/remote-worker",
 ]
 
 [workspace.package]
