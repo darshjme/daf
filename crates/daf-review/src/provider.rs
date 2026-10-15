@@ -207,7 +207,7 @@ pub fn parse_codex_events(bytes: &[u8]) -> ProviderAttempt {
 impl ReviewProvider for CodexProvider {
     fn identity(&self) -> String {
         // Includes every configured option affecting execution or the output contract.
-        serde_json::json!({"adapter":"codex-cli-v1","executable":self.executable,"executable_blake3":executable_fingerprint(&self.executable),"cwd":self.cwd,"model":self.model,"schema":self.schema,"timeout_secs":self.timeout_secs,"max_output_bytes":self.max_output_bytes,"sandbox":"read-only","ignore_user_config":true}).to_string()
+        serde_json::json!({"adapter":"codex-cli-v2","executable":self.executable,"executable_blake3":executable_fingerprint(&self.executable),"cwd":self.cwd,"model":self.model,"schema":self.schema,"timeout_secs":self.timeout_secs,"max_output_bytes":self.max_output_bytes,"sandbox":"read-only","ignore_user_config":true,"isolated_working_directory":true,"project_doc_max_bytes":0}).to_string()
     }
     async fn execute(&self, request: ProviderRequest) -> ProviderAttempt {
         let fail = |e: String| ProviderAttempt {
@@ -224,13 +224,25 @@ impl ReviewProvider for CodexProvider {
         if let Err(e) = std::fs::write(&schema_path, self.schema.to_string()) {
             return fail(format!("write provider schema: {e}"));
         }
-        let mut command = Command::new(&self.executable);
+        // Resolve explicit relative executables before moving out of the caller's cwd.
+        let executable = if self.executable.components().count() > 1 {
+            match std::fs::canonicalize(&self.executable) {
+                Ok(path) => path,
+                Err(e) => return fail(format!("resolve provider executable: {e}")),
+            }
+        } else {
+            self.executable.clone()
+        };
+        let mut command = Command::new(executable);
+        command.current_dir(temp.path());
         command
             .args([
                 "exec",
                 "--json",
                 "--ephemeral",
                 "--ignore-user-config",
+                "--config",
+                "project_doc_max_bytes=0",
                 "--sandbox",
                 "read-only",
                 "--skip-git-repo-check",
@@ -238,7 +250,7 @@ impl ReviewProvider for CodexProvider {
             ])
             .arg(&schema_path)
             .arg("-C")
-            .arg(&self.cwd);
+            .arg(temp.path());
         if let Some(model) = &self.model {
             command.arg("--model").arg(model);
         }
@@ -303,6 +315,37 @@ impl ReviewProvider for CodexProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn provider_uses_isolated_cwd_and_disables_project_documents() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("provider.py");
+        std::fs::write(&script, r#"#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+assert args[args.index('--config') + 1] == 'project_doc_max_bytes=0'
+root = args[args.index('-C') + 1]
+assert os.path.realpath(root) == os.path.realpath(os.getcwd())
+assert os.path.realpath(root) == os.path.realpath(os.path.dirname(args[args.index('--output-schema') + 1]))
+assert os.path.realpath(root) != os.path.realpath(os.path.dirname(__file__))
+sys.stdin.read()
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'{\"findings\":[]}'}}))
+print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'cached_input_tokens':0,'output_tokens':1}}))
+"#).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut provider = CodexProvider::new(dir.path().to_owned(), serde_json::json!({}));
+        provider.executable = script;
+        let response = provider
+            .execute(ProviderRequest {
+                role: "correctness".into(),
+                prompt: "Review".into(),
+            })
+            .await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert_eq!(response.usage.input_tokens, Some(1));
+        assert!(provider.identity().contains("codex-cli-v2"));
+    }
     #[test]
     fn usage_is_reported_independently_of_invalid_final_json() {
         let r = parse_codex_events(

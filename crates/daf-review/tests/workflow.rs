@@ -417,3 +417,68 @@ async fn changed_symlinks_are_rejected_before_provider_even_when_dangling() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn changed_file_manifest_race_is_rejected_before_provider() {
+    let f = Fixture::new("success");
+    let repo = f.root().join("repo");
+    fs::write(repo.join("b.rs"), "unchanged\n").unwrap();
+    for args in [
+        vec!["add", "b.rs"],
+        vec!["commit", "-qm", "add unchanged file"],
+    ] {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let original_path = std::env::var_os("PATH").unwrap();
+    let real_git = std::env::split_paths(&original_path)
+        .map(|dir| dir.join("git"))
+        .find(|candidate| candidate.is_file())
+        .unwrap();
+    let wrapper_dir = f.root().join("bin");
+    fs::create_dir(&wrapper_dir).unwrap();
+    let wrapper = wrapper_dir.join("git");
+    // Delete an unchanged tracked file after returning the initial name listing,
+    // so both subsequent patch reads agree while the initial manifest is stale.
+    let script = format!(
+        r#"#!/usr/bin/python3
+import pathlib,subprocess,sys
+result=subprocess.run([{real_git}]+sys.argv[1:],capture_output=True)
+root=pathlib.Path(__file__).parent.parent
+marker=root/'deleted'
+if '--name-only' in sys.argv and not marker.exists():
+ (root/'repo'/'b.rs').unlink()
+ marker.touch()
+sys.stdout.buffer.write(result.stdout)
+sys.stderr.buffer.write(result.stderr)
+sys.exit(result.returncode)
+"#,
+        real_git = serde_json::to_string(&real_git).unwrap()
+    );
+    fs::write(&wrapper, script).unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let paths = std::iter::once(wrapper_dir).chain(std::env::split_paths(&original_path));
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "subprocess_review_helper", "--nocapture"])
+        .env("DAF_TEST_RESUME_ROOT", f.root())
+        .env("PATH", std::env::join_paths(paths).unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        f.root().join("deleted").exists(),
+        "race hook did not execute"
+    );
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("repository changed while collecting snapshot")
+    );
+    assert_eq!(f.calls(), 0);
+}

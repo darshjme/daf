@@ -251,7 +251,19 @@ fn snapshot(options: &ReviewOptions) -> Result<Snapshot> {
             "--",
         ],
     )?)?;
-    if check != patch {
+    let checked_names = git(
+        &repo,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            &base,
+            "--",
+        ],
+    )?;
+    if check != patch || checked_names != names {
         bail!("repository changed while collecting snapshot");
     }
     for (name, digest) in &contents {
@@ -260,11 +272,12 @@ fn snapshot(options: &ReviewOptions) -> Result<Snapshot> {
         }
     }
     let identity = format!(
-        "{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}",
         repo.display(),
         base,
         patch,
-        serde_json::to_string(&contents)?
+        serde_json::to_string(&contents)?,
+        serde_json::to_string(&files)?
     );
     Ok(Snapshot {
         files,
