@@ -44,3 +44,5 @@ The first version targets tracked textual changes against a commit. Untracked fi
 Run `cargo test --locked -p daf-review` for provider parsing, local validation and subprocess recovery fixtures. Run `cargo test --locked -p daf` for CLI checks. Deterministic fixture tests verify orchestration and persistence; a separately recorded live-provider smoke establishes actual inference and usage reporting. See [the dated verification report](REVIEW-VALIDATION-2026-10-15.md) for commands actually run and their results.
 
 See [the daily-use report](DAILY-REVIEW-2026-10-15.md) for real DAF findings, their reproductions and fixes, measured usage and no-call resume evidence. The strengthened snapshot identity and adapter v2 require a new state directory for runs made with the original adapter.
+
+The [post-merge main verification](MAIN-REVIEW-2026-10-15.md) records 33 scoped tests, 17 CLI checks and a live review with unchanged usage on resume. Provider lookup resolves caller-relative PATH entries before isolation. Windows omitted `.exe` resolution remains an open compatibility finding; this run validates macOS operation, not Windows support.

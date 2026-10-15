@@ -41,4 +41,4 @@ The rebuilt adapter reviewed actual public follow-up commit `4327c4d` against me
 
 Across both real workflow runs and the two instruction-discovery probes, observed usage was 196,828 input tokens, 24,576 cached input tokens and 1,574 output tokens. Resumes added no attempts. These totals exclude the earlier implementation fixture runs documented separately.
 
-The follow-up code and this report are published in [PR #3](https://github.com/darshjme/daf/pull/3). PR #2 is merged; PR #3 remains a separate reviewable follow-up.
+The follow-up code and this report are published in [PR #3](https://github.com/darshjme/daf/pull/3). PR #3 subsequently merged as `a59de98`. See [main verification](MAIN-REVIEW-2026-10-15.md) for the final premerge fix, local checks, new live usage, identical resume and an open Windows compatibility finding.
