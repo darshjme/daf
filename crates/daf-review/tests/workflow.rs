@@ -374,12 +374,13 @@ async fn terminal_usage_survives_provider_hang_after_completion() {
     let script = fs::read_to_string(f.root().join("provider")).unwrap();
     fs::write(
         f.root().join("provider"),
-        format!("{script}\nsys.stdout.flush()\ntime.sleep(10)\n"),
+        format!("{script}\nsys.stdout.flush()\ntime.sleep(30)\n"),
     )
     .unwrap();
     let mut provider = CodexProvider::new(f.root().join("repo"), review_schema());
     provider.executable = f.root().join("provider");
-    provider.timeout_secs = 1;
+    // Allow interpreter startup under parallel test load before the receipt.
+    provider.timeout_secs = 5;
     let response = provider
         .execute(ProviderRequest {
             role: "correctness".into(),
@@ -391,4 +392,28 @@ async fn terminal_usage_survives_provider_hang_after_completion() {
     assert_eq!(response.usage.input_tokens, Some(10));
     assert_eq!(response.usage.cached_input_tokens, Some(3));
     assert_eq!(response.usage.output_tokens, Some(5));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn changed_symlinks_are_rejected_before_provider_even_when_dangling() {
+    for target in ["missing-target", "existing-target"] {
+        let f = Fixture::new("success");
+        let repo = f.root().join("repo");
+        fs::write(repo.join("existing-target"), "target contents\n").unwrap();
+        fs::remove_file(repo.join("a.rs")).unwrap();
+        std::os::unix::fs::symlink(target, repo.join("a.rs")).unwrap();
+        let error = run_review(f.options(), f.provider()).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("changed path must be regular file"),
+            "{target}: {error}"
+        );
+        assert_eq!(
+            f.calls(),
+            0,
+            "{target} must fail before provider invocation"
+        );
+    }
 }

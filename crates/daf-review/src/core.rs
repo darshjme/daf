@@ -196,8 +196,12 @@ fn snapshot(options: &ReviewOptions) -> Result<Snapshot> {
             bail!("review exceeds 128 changed files");
         }
         let path = repo.join(&name);
-        if path.exists() {
-            let meta = fs::symlink_metadata(&path)?;
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        if let Some(meta) = metadata {
             if !meta.is_file() {
                 bail!("changed path must be regular file: {name}");
             }

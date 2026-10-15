@@ -5,7 +5,7 @@ Implemented on main baseline `dafe20d95bb60804c2ac2d4e00f6e833d28d63df`. Verific
 | Check actually run | Result |
 | --- | --- |
 | `cargo test -p daf-orchestrator --lib --offline` | 86 passed |
-| `cargo test --locked -p daf-review -p daf --all-targets` | 28 passed: 8 CLI unit, 3 CLI integration, 6 review unit, 11 workflow integration (one subprocess helper) |
+| `cargo test --locked -p daf-review -p daf --all-targets` | 30 passed: 8 CLI unit, 3 CLI integration, 7 review unit, 12 workflow integration (one subprocess helper) |
 | `cargo clippy --locked -p daf-review -p daf --all-targets -- -D warnings` | Passed |
 | `cargo fmt --all --check` | Passed |
 | `python3 scripts/check_local_cli.py` | All 17 checks passed |
@@ -43,3 +43,9 @@ Counts came from native `turn.completed.usage` events. Repeating the identical C
 A preceding sandboxed provider attempt exited without a terminal usage receipt. Its separate journal retained an interrupted attempt with null usage and blocked automatic retry. Its billing is unknown and excluded from the known totals above; the successful network-enabled run used a separate run directory.
 
 The live smoke verifies one seeded regression and native usage reporting, not review quality across real repositories. Finding validation checks schema and locations, not semantic correctness. Model aliases can change remotely. External model calls cannot be made exactly once by a local journal. Unix process-group cleanup handles timeout/cancellation; non-Unix cleanup covers the direct child. A hard kill of the workflow can prevent cleanup, so restart records uncertainty.
+
+## PR #2 review corrections
+
+Independent pre-merge review reproduced two defects that the initial suite did not cover. Snapshot collection now uses `symlink_metadata` before classifying a missing file, so dangling and resolved symlinks both fail before provider invocation. Multiple terminal completion events now invalidate usage counters instead of presenting the last receipt as the entire attempt; two- and three-receipt regressions cover this ambiguous stream. The final changed-package suite contains 30 passing tests. Scoped clippy and formatting checks passed after both fixes.
+
+The first post-review parallel run exposed a timing-sensitive hang fixture: its one-second deadline could expire before Python emitted its terminal receipt. The receipt-preservation test now permits five seconds for startup and hangs for thirty seconds, retaining the timeout assertion.

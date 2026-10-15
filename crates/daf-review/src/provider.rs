@@ -143,6 +143,7 @@ pub fn parse_codex_events(bytes: &[u8]) -> ProviderAttempt {
         outcome_unknown: true,
     };
     let mut completed = false;
+    let mut ambiguous_usage = false;
     for line in bytes.split(|b| *b == b'\n') {
         if line.is_empty() {
             continue;
@@ -158,6 +159,7 @@ pub fn parse_codex_events(bytes: &[u8]) -> ProviderAttempt {
             Some("turn.completed") => {
                 if completed {
                     response.error = Some("multiple completed turns are unsupported".into());
+                    ambiguous_usage = true;
                 }
                 completed = true;
                 response.outcome_unknown = false;
@@ -184,6 +186,14 @@ pub fn parse_codex_events(bytes: &[u8]) -> ProviderAttempt {
             Some("error") => response.error = Some("provider reported error".into()),
             _ => {}
         }
+    }
+    if ambiguous_usage {
+        // Unsupported streams may contain cumulative or per-turn receipts. Do not
+        // report the last receipt as the complete cost of this attempt.
+        response.usage = Usage {
+            source: "codex.multiple_completed_turns.unknown".into(),
+            ..Usage::default()
+        };
     }
     if !completed && response.error.is_none() {
         response.error = Some("provider did not complete a turn".into());
@@ -303,6 +313,21 @@ mod tests {
         assert!(r.error.is_some());
         assert_eq!(r.usage.input_tokens, Some(12));
         assert_eq!(r.usage.cached_input_tokens, Some(0));
+    }
+    #[test]
+    fn multiple_completed_turns_cannot_claim_complete_usage() {
+        let event = b"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":100,\"cached_input_tokens\":10,\"output_tokens\":20}}\n";
+        for count in [2, 3] {
+            let r = parse_codex_events(&event.repeat(count));
+            assert_eq!(
+                r.error.as_deref(),
+                Some("multiple completed turns are unsupported")
+            );
+            assert_eq!(r.usage.input_tokens, None);
+            assert_eq!(r.usage.cached_input_tokens, None);
+            assert_eq!(r.usage.output_tokens, None);
+            assert_eq!(r.usage.source, "codex.multiple_completed_turns.unknown");
+        }
     }
     #[test]
     fn absent_and_invalid_counters_are_unknown() {

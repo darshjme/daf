@@ -29,7 +29,7 @@ A run directory is locked against simultaneous writers. Checkpoints use atomic r
 
 ## Usage evidence
 
-Each attempt retains provider-reported input, cached-input and output tokens when available. CLI JSON includes `usage_summary` with known subtotals and a count of attempts with incomplete usage; the Rust API exposes `ReviewReport::usage_summary()`. Missing fields remain null. Invalid findings and failed attempts retain observed usage; cached completed reviews do not create new provider calls. Cached-input tokens are reported separately and must not be added to input tokens as if they were new input. Token counts are not a price estimate. Select an explicit `--model` for repeatable configuration. Provider-side model aliases and default-model changes cannot be detected from local configuration alone. Interrupted calls can leave billing unknown.
+Each attempt retains provider-reported input, cached-input and output tokens when available. CLI JSON includes `usage_summary` with known subtotals and a count of attempts with incomplete usage; the Rust API exposes `ReviewReport::usage_summary()`. Missing fields remain null. Unsupported multiple-completion streams fail the attempt and mark all counters unknown rather than undercounting earlier receipts. Invalid findings and failed attempts retain observed usage; cached completed reviews do not create new provider calls. Cached-input tokens are reported separately and must not be added to input tokens as if they were new input. Token counts are not a price estimate. Select an explicit `--model` for repeatable configuration. Provider-side model aliases and default-model changes cannot be detected from local configuration alone. Interrupted calls can leave billing unknown.
 
 ## Scope and design knowledge
 
