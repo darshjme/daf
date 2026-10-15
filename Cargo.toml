@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/daf-core",
+    "crates/daf-review",
     "crates/daf-ddal",
     "crates/daf-orchestrator",
     "crates/daf-provision",

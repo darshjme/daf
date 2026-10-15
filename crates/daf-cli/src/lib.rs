@@ -55,6 +55,9 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Review changed tracked files with resumable specialists.
+    Review(commands::review::ReviewArgs),
+
     /// Initialize a new DAF project directory.
     Init(commands::init::InitArgs),
 

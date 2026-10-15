@@ -1,0 +1,25 @@
+[package]
+name = "daf-review"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Resumable changed-file review using DAF specialist execution"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+blake3.workspace = true
+daf-core = { path = "../daf-core" }
+daf-graph = { path = "../daf-graph" }
+daf-orchestrator = { path = "../daf-orchestrator" }
+fs2 = "0.4"
+libc = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]

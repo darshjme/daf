@@ -5,6 +5,14 @@ All notable changes to DAF will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased — changed-file review
+
+### Added
+- `daf review` and `daf-review`: tracked-change snapshots, independent correctness/security prompts through registered DAF workers, strict finding validation and exact deduplication.
+- Locked atomic run journals, fingerprint-bound resume, cumulative retry limits and explicit retry authorization for interrupted provider outcomes.
+- Native Codex CLI adapter with bounded subprocess execution and provider-reported per-attempt usage, including null for unknown counters.
+- Local subprocess recovery tests and workflow design documentation.
+
 ## Unreleased — 2026-10-06 audit
 
 ### Fixed

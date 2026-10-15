@@ -13,6 +13,7 @@ name = "daf"
 path = "src/main.rs"
 
 [dependencies]
+daf-review = { path = "../daf-review" }
 daf-core = { path = "../daf-core" }
 daf-ddal = { path = "../daf-ddal" }
 daf-transport = { path = "../daf-transport" }
