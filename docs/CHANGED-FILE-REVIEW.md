@@ -37,8 +37,10 @@ This workflow adds an application contract above existing DAF plans, workers and
 
 The design follows the reusable-workflow lesson from [Claude Code workflows](https://code.claude.com/docs/en/workflows): named contracts, validated results and explicit recovery matter more than adding another set of agent-spawn commands. Existing DAF plans already provide dependencies, capability admission and retries. This implementation supplies the application lifecycle and provider evidence that were missing.
 
-The first version targets tracked textual changes against a commit. Untracked files must be added to Git before review. Check the run report and errors for unsupported inputs; do not interpret an omitted file as reviewed. The provider runs with a read-only sandbox, but repository contents are still untrusted model input. Findings are advisory output and never execute commands.
+The first version targets tracked textual changes against a commit. Untracked files must be added to Git before review. Check the run report and errors for unsupported inputs; do not interpret an omitted file as reviewed. The provider runs from an isolated temporary directory with project-document discovery disabled and a read-only sandbox, but repository contents are still untrusted model input. Findings are advisory output and never execute commands.
 
 ## Verification
 
 Run `cargo test --locked -p daf-review` for provider parsing, local validation and subprocess recovery fixtures. Run `cargo test --locked -p daf` for CLI checks. Deterministic fixture tests verify orchestration and persistence; a separately recorded live-provider smoke establishes actual inference and usage reporting. See [the dated verification report](REVIEW-VALIDATION-2026-10-15.md) for commands actually run and their results.
+
+See [the daily-use report](DAILY-REVIEW-2026-10-15.md) for real DAF findings, their reproductions and fixes, measured usage and no-call resume evidence. The strengthened snapshot identity and adapter v2 require a new state directory for runs made with the original adapter.

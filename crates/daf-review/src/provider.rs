@@ -45,16 +45,39 @@ pub struct CodexProvider {
     pub timeout_secs: u64,
     pub max_output_bytes: usize,
 }
+// Resolve in the caller's directory before the provider moves to its isolated cwd.
+// The same selection feeds both cache identity and process launch.
+fn resolve_executable(executable: &std::path::Path) -> std::io::Result<PathBuf> {
+    if executable.components().count() > 1 || executable.is_absolute() {
+        return std::fs::canonicalize(executable);
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&paths) {
+            let candidate = directory.join(executable);
+            let Ok(metadata) = std::fs::metadata(&candidate) else {
+                continue;
+            };
+            if !metadata.is_file() {
+                continue;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if metadata.permissions().mode() & 0o111 == 0 {
+                    continue;
+                }
+            }
+            return std::fs::canonicalize(candidate);
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "provider executable not found in PATH",
+    ))
+}
 fn executable_fingerprint(executable: &std::path::Path) -> Option<String> {
     use std::io::Read;
-    let resolved = if executable.components().count() == 1 {
-        std::env::split_paths(&std::env::var_os("PATH")?)
-            .map(|p| p.join(executable))
-            .find(|p| p.is_file())?
-    } else {
-        executable.to_path_buf()
-    };
-    let mut file = std::fs::File::open(resolved).ok()?;
+    let mut file = std::fs::File::open(resolve_executable(executable).ok()?).ok()?;
     let mut hasher = blake3::Hasher::new();
     let mut buf = [0; 65536];
     loop {
@@ -207,7 +230,7 @@ pub fn parse_codex_events(bytes: &[u8]) -> ProviderAttempt {
 impl ReviewProvider for CodexProvider {
     fn identity(&self) -> String {
         // Includes every configured option affecting execution or the output contract.
-        serde_json::json!({"adapter":"codex-cli-v1","executable":self.executable,"executable_blake3":executable_fingerprint(&self.executable),"cwd":self.cwd,"model":self.model,"schema":self.schema,"timeout_secs":self.timeout_secs,"max_output_bytes":self.max_output_bytes,"sandbox":"read-only","ignore_user_config":true}).to_string()
+        serde_json::json!({"adapter":"codex-cli-v2","executable":self.executable,"executable_blake3":executable_fingerprint(&self.executable),"cwd":self.cwd,"model":self.model,"schema":self.schema,"timeout_secs":self.timeout_secs,"max_output_bytes":self.max_output_bytes,"sandbox":"read-only","ignore_user_config":true,"isolated_working_directory":true,"project_doc_max_bytes":0}).to_string()
     }
     async fn execute(&self, request: ProviderRequest) -> ProviderAttempt {
         let fail = |e: String| ProviderAttempt {
@@ -224,13 +247,20 @@ impl ReviewProvider for CodexProvider {
         if let Err(e) = std::fs::write(&schema_path, self.schema.to_string()) {
             return fail(format!("write provider schema: {e}"));
         }
-        let mut command = Command::new(&self.executable);
+        let executable = match resolve_executable(&self.executable) {
+            Ok(path) => path,
+            Err(e) => return fail(format!("resolve provider executable: {e}")),
+        };
+        let mut command = Command::new(executable);
+        command.current_dir(temp.path());
         command
             .args([
                 "exec",
                 "--json",
                 "--ephemeral",
                 "--ignore-user-config",
+                "--config",
+                "project_doc_max_bytes=0",
                 "--sandbox",
                 "read-only",
                 "--skip-git-repo-check",
@@ -238,7 +268,7 @@ impl ReviewProvider for CodexProvider {
             ])
             .arg(&schema_path)
             .arg("-C")
-            .arg(&self.cwd);
+            .arg(temp.path());
         if let Some(model) = &self.model {
             command.arg("--model").arg(model);
         }
@@ -303,6 +333,100 @@ impl ReviewProvider for CodexProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn provider_uses_isolated_cwd_and_disables_project_documents() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("provider.py");
+        std::fs::write(&script, r#"#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+assert args[args.index('--config') + 1] == 'project_doc_max_bytes=0'
+root = args[args.index('-C') + 1]
+assert os.path.realpath(root) == os.path.realpath(os.getcwd())
+assert os.path.realpath(root) == os.path.realpath(os.path.dirname(args[args.index('--output-schema') + 1]))
+assert os.path.realpath(root) != os.path.realpath(os.path.dirname(__file__))
+sys.stdin.read()
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'{\"findings\":[]}'}}))
+print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'cached_input_tokens':0,'output_tokens':1}}))
+"#).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut provider = CodexProvider::new(dir.path().to_owned(), serde_json::json!({}));
+        provider.executable = script;
+        let response = provider
+            .execute(ProviderRequest {
+                role: "correctness".into(),
+                prompt: "Review".into(),
+            })
+            .await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert_eq!(response.usage.input_tokens, Some(1));
+        assert!(provider.identity().contains("codex-cli-v2"));
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn provider_resolves_relative_path_before_isolation() {
+        use std::os::unix::fs::PermissionsExt;
+        const CHILD: &str = "DAF_PROVIDER_PATH_TEST";
+        if let Some(executable) = std::env::var_os(CHILD) {
+            let mut provider =
+                CodexProvider::new(std::env::current_dir().unwrap(), serde_json::json!({}));
+            provider.executable = executable.into();
+            let identity: Value = serde_json::from_str(&provider.identity()).unwrap();
+            assert!(identity["executable_blake3"].is_string());
+            let result = provider
+                .execute(ProviderRequest {
+                    role: "correctness".into(),
+                    prompt: "Review".into(),
+                })
+                .await;
+            assert!(result.error.is_none(), "{:?}", result.error);
+            assert_eq!(result.usage.input_tokens, Some(1));
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("bin")).unwrap();
+        let script = r#"#!/usr/bin/python3
+import json,sys
+sys.stdin.read()
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'{\"findings\":[]}'}}))
+print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'cached_input_tokens':0,'output_tokens':1}}))
+"#;
+        for relative in ["bin/review-provider", "review-provider"] {
+            let path = dir.path().join(relative);
+            std::fs::write(&path, script).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::create_dir(dir.path().join("non-executable")).unwrap();
+        let blocked = dir.path().join("non-executable/review-provider");
+        std::fs::write(&blocked, "not executable").unwrap();
+        std::fs::set_permissions(blocked, std::fs::Permissions::from_mode(0o644)).unwrap();
+        // Each child has its own PATH/cwd; parallel tests retain their environment.
+        for (path, executable) in [
+            ("bin", "review-provider"),
+            ("non-executable:bin", "review-provider"),
+            ("", "review-provider"),
+            ("bin", "./bin/review-provider"),
+        ] {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "provider::tests::provider_resolves_relative_path_before_isolation",
+                    "--nocapture",
+                ])
+                .current_dir(dir.path())
+                .env("PATH", path)
+                .env(CHILD, executable)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+    }
     #[test]
     fn usage_is_reported_independently_of_invalid_final_json() {
         let r = parse_codex_events(
