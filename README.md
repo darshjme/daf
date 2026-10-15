@@ -54,6 +54,10 @@ The example registers three handlers and runs prepare → review → verify. App
 
 ![Reviewed plans, bounded execution and evidence](assets/swarm.svg)
 
+## Review changed files
+
+`daf review --repo . --base HEAD --state-dir /tmp/daf-review-change` runs correctness and security specialists through the existing executor, validates findings and records provider usage per attempt. Repeat the command to resume completed reviews. See [recovery, usage and scope](docs/CHANGED-FILE-REVIEW.md).
+
 ## Compose the libraries
 
 ```mermaid

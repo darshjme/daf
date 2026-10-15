@@ -662,6 +662,7 @@ dependencies = [
  "daf-orchestrator",
  "daf-provision",
  "daf-registry",
+ "daf-review",
  "daf-runtime",
  "daf-sdk",
  "daf-transport",
@@ -1005,6 +1006,24 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "daf-review"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "blake3",
+ "daf-core",
+ "daf-graph",
+ "daf-orchestrator",
+ "fs2",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

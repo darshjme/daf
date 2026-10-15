@@ -56,6 +56,7 @@ async fn main() -> Result<()> {
 
     // ---------- dispatch -------------------------------------------------
     match &command {
+        Command::Review(args) => daf::commands::review::exec(args, &cli).await,
         Command::Init(args) => daf::commands::init::exec(args, &cli).await,
         Command::Run(args) => daf::commands::run::exec(args, &cli).await,
         Command::Agent(cmd) => daf::commands::agent::exec(cmd, &cli).await,

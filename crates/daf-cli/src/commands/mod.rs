@@ -9,6 +9,7 @@ pub mod configure;
 pub mod init;
 pub mod log;
 pub mod provision;
+pub mod review;
 pub mod run;
 pub mod status;
 pub mod vault;
