@@ -34,3 +34,11 @@ This real run demonstrates useful defect discovery, durable reuse and measured p
 The snapshot race regression asserts rejection before any provider call. The provider subprocess regression verifies its actual working directory and instruction-discovery flag. `cargo test --locked -p daf-review -p daf --all-targets` passed all 32 tests (8 CLI unit, 3 CLI integration, 8 review unit, 13 workflow integration). Scoped clippy, formatting and diff checks passed. The full workspace suite was not rerun.
 
 Two separate live instruction-discovery diagnostic calls reported 48,528 input tokens, 24,576 cached input tokens and 40 output tokens combined. They are not included in the daily workflow's totals above. Cached tokens are a subset of input tokens.
+
+## Corrected workflow live acceptance
+
+The rebuilt adapter reviewed actual public follow-up commit `4327c4d` against merged main `73ec975`, with a fresh `daily-daf-fixed-state` directory and the same model/deadline/retry settings. Both specialists succeeded with no findings. Correctness reported 29,140 input / 0 cached / 152 output tokens; security reported 29,140 / 0 / 103. Totals: 58,280 input, 0 cached and 255 output tokens; no unknown counters. An identical restricted-environment resume produced the same decoded report, exactly two attempts and unchanged usage. This evidence applies to the code at `4327c4d`; the later report-only commit records these results.
+
+Across both real workflow runs and the two instruction-discovery probes, observed usage was 196,828 input tokens, 24,576 cached input tokens and 1,574 output tokens. Resumes added no attempts. These totals exclude the earlier implementation fixture runs documented separately.
+
+The follow-up code and this report are published in [PR #3](https://github.com/darshjme/daf/pull/3). PR #2 is merged; PR #3 remains a separate reviewable follow-up.
