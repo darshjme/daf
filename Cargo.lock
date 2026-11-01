@@ -653,6 +653,7 @@ dependencies = [
  "clap",
  "comfy-table",
  "console",
+ "daf-adapter",
  "daf-configure",
  "daf-core",
  "daf-ddal",
@@ -678,6 +679,18 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "daf-adapter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

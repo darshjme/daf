@@ -4,6 +4,7 @@
 //! - An `Args` or `Command` struct for clap parsing.
 //! - An `exec` function that performs the work.
 
+pub mod adapter;
 pub mod agent;
 pub mod configure;
 pub mod init;

@@ -55,6 +55,9 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Run a portable coding-agent process adapter.
+    #[command(subcommand)]
+    Adapter(commands::adapter::AdapterCommand),
     /// Review changed tracked files with resumable specialists.
     Review(commands::review::ReviewArgs),
 
