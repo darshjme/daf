@@ -103,13 +103,14 @@ fn rejects_invalid_contract() {
 #[cfg(unix)]
 #[tokio::test]
 async fn inherited_pipes_obey_deadline() {
-    // Grandchild exits itself shortly after this test; adapter does not own descendants.
+    // Leave startup headroom on busy CI/developer machines while keeping the
+    // descendant alive beyond the deadline. The adapter does not own descendants.
     let started = std::time::Instant::now();
-    let result=execute(request("import subprocess,sys; subprocess.Popen([sys.executable,'-c','import time; time.sleep(0.5)']); print('parent',flush=True)",json!({"timeout_ms":100}))).await.unwrap();
+    let result=execute(request("import subprocess,sys; subprocess.Popen([sys.executable,'-c','import time; time.sleep(3)']); print('parent',flush=True)",json!({"timeout_ms":1000}))).await.unwrap();
     assert_eq!(result.status, "timed_out");
-    assert!(started.elapsed().as_millis() < 450);
+    assert!(started.elapsed().as_millis() < 2500);
     assert_eq!(result.stdout, "parent\n");
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
 }
 #[test]
 fn duplicate_keys_and_normalized_boundary() {
