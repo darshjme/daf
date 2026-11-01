@@ -54,6 +54,10 @@ The example registers three handlers and runs prepare → review → verify. App
 
 ![Reviewed plans, bounded execution and evidence](assets/swarm.svg)
 
+## Portable coding CLI adapter
+
+Use `cargo build --locked -p daf-adapter` for a lightweight process adapter, or `daf adapter` in the full CLI. Versioned JSON requests preserve explicit argv, cap captured output and apply a shared deadline. See the [portable adapter contract](docs/PORTABLE-ADAPTER.md) for the Python and DJCODE integration boundary and limitations.
+
 ## Review changed files
 
 `daf review --repo . --base HEAD --state-dir /tmp/daf-review-change` runs correctness and security specialists through the existing executor, validates findings and records provider usage per attempt. Repeat the command to resume completed reviews. See [recovery, usage and scope](docs/CHANGED-FILE-REVIEW.md).
@@ -102,3 +106,5 @@ Integration tests exercise exported graph → orchestrator → SDK execution and
 `daf vault init`, `set`, `get`, `list` and `rotate` operate on `.daf/vault`. Password entry is hidden; automation can use `DAF_VAULT_PASSWORD` and `DAF_VAULT_DIR`. Secret values remain hidden unless `get --raw` is requested.
 
 Contributions must include reproducible evidence and honest capability boundaries. See [CONTRIBUTING.md](CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md).
+
+![Portable execution architecture](docs/portable-architecture.svg)

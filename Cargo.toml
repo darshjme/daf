@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/daf-adapter",
     "crates/daf-core",
     "crates/daf-review",
     "crates/daf-ddal",

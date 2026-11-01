@@ -53,3 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Benchmarks for DDAL throughput and graph execution
 - Integration test suite
 - Examples: basic agent, multi-agent pipeline, infrastructure, configuration
+
+## Portable process adapter (2026-11-01)
+
+Added `daf-adapter` and `daf adapter` with the versioned `daf.process.v1` JSON contract, concurrent bounded capture, whole-operation deadlines and explicit DJCODE integration boundaries. Local conformance coverage includes malformed requests, failures, pipe pressure and timeout cleanup.

@@ -56,6 +56,14 @@ async fn main() -> Result<()> {
 
     // ---------- dispatch -------------------------------------------------
     match &command {
+        Command::Adapter(args) => match daf::commands::adapter::exec(args).await {
+            Ok(true) => Ok(()),
+            Ok(false) => std::process::exit(1),
+            Err(error) => {
+                eprintln!("{error:#}");
+                std::process::exit(2);
+            }
+        },
         Command::Review(args) => daf::commands::review::exec(args, &cli).await,
         Command::Init(args) => daf::commands::init::exec(args, &cli).await,
         Command::Run(args) => daf::commands::run::exec(args, &cli).await,
