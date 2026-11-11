@@ -29,7 +29,7 @@ use std::fmt::Write;
 /// Edges are labeled with their kind.
 pub fn to_dot(graph: &ExecutionGraph) -> String {
     let mut out = String::new();
-    writeln!(out, "digraph \"{}\" {{", graph.name).unwrap();
+    writeln!(out, "digraph \"{}\" {{", escape_dot_label(&graph.name)).unwrap();
     writeln!(out, "    rankdir=TB;").unwrap();
     writeln!(
         out,
@@ -49,7 +49,12 @@ pub fn to_dot(graph: &ExecutionGraph) -> String {
         writeln!(
             out,
             "    \"{}\" [label=\"{}\\n({})\\n[{}]\", fillcolor=\"{}\", fontcolor=\"{}\"];",
-            node.id.0, node.name, node.kind, node.state, color, font_color
+            node.id.0,
+            escape_dot_label(&node.name),
+            node.kind,
+            node.state,
+            color,
+            font_color
         )
         .unwrap();
     }
@@ -75,6 +80,14 @@ pub fn to_dot(graph: &ExecutionGraph) -> String {
 
     writeln!(out, "}}").unwrap();
     out
+}
+
+/// Escape text before placing it inside a quoted DOT string.
+fn escape_dot_label(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 /// Map node state to DOT fill color.
@@ -134,7 +147,9 @@ pub fn to_mermaid(graph: &ExecutionGraph) -> String {
         let id = sanitize_mermaid_id(&node.id.0.to_string());
         let label = format!(
             "{}<br/><small>{} | {}</small>",
-            node.name, node.kind, node.state
+            escape_mermaid_label(&node.name),
+            node.kind,
+            node.state
         );
         // Use different node shapes based on kind.
         let shape = match node.kind {
@@ -220,6 +235,25 @@ pub fn to_mermaid(graph: &ExecutionGraph) -> String {
     out
 }
 
+/// Keep user text separate from Mermaid syntax and the HTML layout we emit.
+/// Mermaid uses decimal entities such as `#34;`, including `#35;` for a hash.
+fn escape_mermaid_label(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '"' => escaped.push_str("#34;"),
+            '#' => escaped.push_str("#35;"),
+            '&' => escaped.push_str("#38;"),
+            '<' => escaped.push_str("#60;"),
+            '>' => escaped.push_str("#62;"),
+            '\n' => escaped.push_str("<br/>"),
+            '\r' => escaped.push_str("#13;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 /// Map node state to Mermaid CSS class name.
 fn state_class_mermaid(state: NodeState) -> &'static str {
     match state {
@@ -298,6 +332,26 @@ mod tests {
         assert!(mmd.contains("data_flow"));
         assert!(mmd.contains("classDef succeeded"));
         assert!(mmd.contains("classDef running"));
+    }
+
+    #[test]
+    fn dot_escapes_graph_and_node_labels() {
+        let mut graph = ExecutionGraph::new("review \"plan\"\\v1");
+        graph.add_node(make_task("say \"hello\"\\path\nnext"));
+        let dot = to_dot(&graph);
+        assert!(dot.starts_with(r#"digraph "review \"plan\"\\v1" {"#));
+        assert!(dot.contains(r#"label="say \"hello\"\\path\nnext\n(Task)"#));
+    }
+
+    #[test]
+    fn mermaid_escapes_user_labels_but_preserves_layout_markup() {
+        let mut graph = ExecutionGraph::new("labels");
+        graph.add_node(make_task("say \"hello\" <tag> & #quot;\nnext"));
+        let diagram = to_mermaid(&graph);
+        assert!(diagram.contains("say #34;hello#34; #60;tag#62; #38; #35;quot;<br/>next"));
+        assert!(diagram.contains("<br/><small>Task | Pending</small>"));
+        assert!(!diagram.contains("<tag>"));
+        assert!(!diagram.contains("#quot;"));
     }
 
     #[test]

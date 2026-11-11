@@ -9,6 +9,16 @@ DAF makes agent infrastructure inspectable: dependency graphs, bounded execution
 
 [Engineering standard](docs/STANDARD.md) · [Audit and remaining gaps](docs/AUDIT-2026-10-06.md) · [Swarm verification](docs/SWARM-VALIDATION-2026-10-06.md) · [Architecture](ARCHITECTURE.md) · [Runnable examples](examples/README.md) · [DDAL](docs/DDAL.md) · [Memory](docs/MEMORY.md)
 
+## Choose an entry point
+
+| You want to… | Start here |
+| :--- | :--- |
+| Run local commands with dependencies and limits | [First mission](#run-your-first-mission) |
+| Coordinate registered specialist handlers | [Specialist team](#build-a-specialist-team) and [team guide](docs/SWARM.md) |
+| Call a coding CLI from Rust or Python | [Portable process adapter](docs/PORTABLE-ADAPTER.md) |
+| Review a Git diff with recoverable execution | [Changed-file review](docs/CHANGED-FILE-REVIEW.md) |
+| Work on the Rust libraries | [Component map](#compose-the-libraries) and [local verification](#verify-locally) |
+
 ## Run your first mission
 
 Rust 2024 edition; declared minimum Rust 1.85. The full workspace also requires a C/C++ toolchain, CMake and libclang for native storage dependencies.
@@ -58,6 +68,8 @@ The example registers three handlers and runs prepare → review → verify. App
 
 Use `cargo build --locked -p daf-adapter` for a lightweight process adapter, or `daf adapter` in the full CLI. Versioned JSON requests preserve explicit argv, cap captured output and apply a shared deadline. See the [portable adapter contract](docs/PORTABLE-ADAPTER.md) for the Python and DJCODE integration boundary and limitations.
 
+![Portable execution architecture](docs/portable-architecture.svg)
+
 ## Review changed files
 
 `daf review --repo . --base HEAD --state-dir /tmp/daf-review-change` runs correctness and security specialists through the existing executor, validates findings and records provider usage per attempt. Repeat the command to resume completed reviews. See [recovery, usage and scope](docs/CHANGED-FILE-REVIEW.md).
@@ -91,6 +103,15 @@ The [standard](docs/STANDARD.md) defines 22 measurable requirements across execu
 
 ## Verify locally
 
+For a focused first check without the native storage dependencies:
+
+```sh
+cargo test --locked -p daf-graph
+cargo test --locked -p daf-adapter
+```
+
+For a full workspace check, install the native prerequisites listed above:
+
 ```sh
 cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
@@ -107,4 +128,8 @@ Integration tests exercise exported graph → orchestrator → SDK execution and
 
 Contributions must include reproducible evidence and honest capability boundaries. See [CONTRIBUTING.md](CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md).
 
-![Portable execution architecture](docs/portable-architecture.svg)
+## Related projects
+
+- [daf-python](https://github.com/darshjme/daf-python): Python process adapters for the portable DAF contract.
+- [DJcode](https://github.com/darshjme/djcode): an interactive coding CLI with tool approvals and recoverable sessions.
+- [DarshJDB](https://github.com/darshjme/darshjdb): a separate PostgreSQL-backed application and agent-memory server; it is not required to run DAF.
